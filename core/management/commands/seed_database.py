@@ -9,7 +9,7 @@ from core.models import (
     Roles, User, Department, LevelReferences, 
     Nurse, Management, ConsultationTypes, 
     ConsultationStatus, Consultations, 
-    ConsultationMaterials, LevelUpgradeStatus, 
+    CounselingMaterials, LevelUpgradeStatus, 
     LevelUpgradeRequests, SystemConfiguration
 )
 
@@ -22,7 +22,7 @@ class Command(BaseCommand):
             Roles, User, Department, LevelReferences, 
             Nurse, Management, ConsultationTypes, 
             ConsultationStatus, Consultations, 
-            ConsultationMaterials, LevelUpgradeStatus, 
+            CounselingMaterials, LevelUpgradeStatus, 
             LevelUpgradeRequests, SystemConfiguration
         ]
         for model in models_to_clear:
@@ -165,7 +165,7 @@ class Command(BaseCommand):
 
         # Generate Consultation Materials
         for consultation in consultations:
-            ConsultationMaterials.objects.create(
+            CounselingMaterials.objects.create(
                 consultation=consultation,
                 title=f'Material for {consultation.title}',
                 description=fake.text(max_nb_chars=100),

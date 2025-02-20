@@ -54,7 +54,7 @@ INSTALLED_APPS = [
     # 'Apps.levels',
     # 'Apps.materials',
     # 'test3',
-    'core',
+    'core.apps.CoreConfig',
         
 ]
 
@@ -114,9 +114,9 @@ REST_FRAMEWORK = {
 
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=90),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
-    'ROTATE_REFRESH_TOKENS': True,  # Optionally rotate tokens on refresh
+    'ROTATE_REFRESH_TOKENS': False,  # Optionally rotate tokens on refresh
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
@@ -197,6 +197,8 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field

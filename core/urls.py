@@ -19,13 +19,17 @@ from .views import (
     ConsultationsViewSet,
     ConsultationResultViewSet,
     MaterialReadStatusViewSet,
-    ConsultationMaterialsViewSet,
+    CounselingMaterialsViewSet,
     AuditLogViewSet,
     ManagementViewSet,
     SystemConfigurationViewSet,
     TokenIdentifyView,
+    CustomTokenRefresh,
     ) 
-
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
 
 router = DefaultRouter()
 router.register(r'nurses', NurseViewSet, basename='nurse')
@@ -39,7 +43,7 @@ router.register(r'levelhistory', LevelHistoryViewSet, basename='level-history')
 router.register(r'consultations', ConsultationsViewSet, basename='consultations')
 router.register(r'consultationresult', ConsultationResultViewSet, basename='consultation-result')
 router.register(r'consusultationreadstatus', MaterialReadStatusViewSet, basename='consultation-read-status')
-router.register(r'consultationmaterial', ConsultationMaterialsViewSet, basename='consultation-material')
+router.register(r'counselingmaterial', CounselingMaterialsViewSet, basename='counseling-material')
 router.register(r'auditlog', AuditLogViewSet, basename='audit-log')
 router.register(r'systemconfiguration', SystemConfigurationViewSet, basename='system-configuration')
 
@@ -49,7 +53,8 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutApiView.as_view(), name='logout'),
     path('test/', TestAuthView.as_view(), name='test'),
-    path('verifytoken/', TokenIdentifyView.as_view(), name ='token-identify'),
+    path('refresh-token/', CustomTokenRefresh.as_view(), name ='refresh-token'),
+    path('verifytoken/', TokenObtainPairView.as_view(), name ='token-identify'),
     path('nurse-level/', NurseLevelView.as_view(), name='nurse-level'),
     path('change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('request-password-reset/', RequestPasswordResetView.as_view(), name='request-password-reset'),

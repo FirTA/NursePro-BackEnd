@@ -33,11 +33,12 @@ from .serializers import (
     ConsultationStatusSerializer,
     ConsultationSerializer,
     ConsultationResultSerializer,
-    ConsultationMaterialSerializer,
+    CounselingMaterialSerializer,
     MaterialReadStatusSerializers,
     AuditLogSerializers,
     ManagementSerializers,
     SystemConfigurationSerializers,
+    CounselingMaterialCreateSerializer,
 )
 from .models import (
     User,
@@ -51,7 +52,7 @@ from .models import (
     ConsultationStatus,
     ConsultationTypes,
     ConsultationResult,
-    ConsultationMaterials,
+    CounselingMaterials,
     MaterialReadStatus,
     LevelHistory,
     SystemConfiguration,
@@ -64,7 +65,35 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 from rest_framework.request import Request
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
+from rest_framework_simplejwt.tokens import RefreshToken
 
+class CustomTokenRefresh(TokenRefreshView):
+  def post(self, request, *args, **kwargs):
+        try:
+            # Call the original TokenRefreshView logic
+            print(request)
+            response = super().post(request, *args, **kwargs)
+
+            # If successful, return the response as usual
+            if response.status_code == 200:
+                return response
+        except Exception as e:
+            refresh = request.data.get("refresh")
+            print(e)
+            print(refresh)
+            token = RefreshToken(refresh)
+            user_id = token.payload.get('user_id')
+            user = User.objects.get(id = user_id)
+            user.is_login = False
+            user.save()
+            return Response(
+                {"error": "Refresh token expired. Please log in again."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
 class TokenIdentifyView(APIView):
     def post(self, request):
@@ -316,10 +345,16 @@ class ConsultationResultViewSet(viewsets.ModelViewSet):
     queryset = ConsultationResult.objects.all()
     serializer_class = ConsultationResultSerializer
             
-class ConsultationMaterialsViewSet(viewsets.ModelViewSet):
+class CounselingMaterialsViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-    queryset = ConsultationMaterials.objects.all()
-    serializer_class = ConsultationMaterialSerializer
+    queryset = CounselingMaterials.objects.all()
+    serializer_class = CounselingMaterialSerializer
+    
+    def get_serializer_class(self):
+        
+        if self.request.method == "PATCH":
+            return CounselingMaterialCreateSerializer
+        return super().get_serializer_class()
             
 class MaterialReadStatusViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]

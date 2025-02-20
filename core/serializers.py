@@ -19,12 +19,14 @@ from .models import (
     Consultations,
     ConsultationTypes,
     ConsultationStatus,
-    ConsultationMaterials,
+    CounselingMaterials,
     ConsultationResult,
     SystemConfiguration,
     AuditLog,
-    
+    Materials    
 )
+
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 
@@ -242,19 +244,13 @@ list parameter :
 """        
 class LevelReferenceSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
+    update_at = serializers.DateTimeField(default=timezone.now)
+    next_level = serializers.CharField(allow_blank=True, required=False)  # Add this line
+        
     class Meta:
         model = LevelReference
-        fields = ['level','next_level','required_time_in_month', 'created_at', 'update_at']
+        fields = ['id','level','next_level','required_time_in_month', 'created_at', 'update_at']
         read_only_fields = ['created_at','updated_at']
-        validators = [
-            serializers.UniqueTogetherValidator(
-                queryset=LevelReference.objects.all(),
-                fields=['level','next_level'],
-                message="level sudah terdaftar"
-            )
-        ]
     
 class LevelHistorySerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
@@ -323,15 +319,65 @@ class ConsultationSerializer(serializers.ModelSerializer):
         model = Consultations
         fields = ['title', 'nurses','created_at','updated_at']
         read_only_fields = ['created_at','updated_at']
+        
+class CounselingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Consultations
+        fields = ["title"]
 
-class ConsultationMaterialSerializer(serializers.ModelSerializer):
+class MaterialSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Materials
+        fields = ["title","file_path","size_readable","created_at"]
+
+class CounselingMaterialSerializer(serializers.ModelSerializer):
+    counseling_title = serializers.CharField( source = 'counseling.title',read_only = True)
+    file = MaterialSerializer(many = True)
     created_at = serializers.DateTimeField(default=timezone.now)
     update_at = serializers.DateTimeField(default=timezone.now)    
     
     class Meta:
-        model = ConsultationMaterials
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']\
+        model = CounselingMaterials
+        fields = ['id','counseling_title', 'description', 'file','created_at','update_at']
+        read_only_fields = ['created_at','updated_at']
+        
+class CounselingMaterialCreateSerializer(serializers.ModelSerializer):
+    class MaterialCreateSerializer(serializers.ModelSerializer):
+        file_path = serializers.FileField(required = False)
+        class Meta:
+            model = Materials
+            fields = ('file_path',)
+        
+    file = MaterialCreateSerializer(many = True, required = False)
+    
+    def update(self, instance, validated_data):
+        
+        print(validated_data, self)
+        material_data = self.context['request'].FILES.getlist('file')
+        
+        instance.description = validated_data.get('description', instance.description)  
+        instance.save()      
+        # instance = super().update(instance, validated_data)
+                
+        if material_data: 
+            # clear existing item
+            instance.file.clear()
+            
+            print(instance)
+            
+            # Recreate items with updated data
+            for data in material_data:
+                material_instance = Materials.objects.create(file_path=data)
+                instance.file.add(material_instance)
+        return instance
+    
+    class Meta:
+        model = CounselingMaterials
+        fields = (
+            'description',
+            'file'
+        )
+        
 
 class ConsultationResultSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)

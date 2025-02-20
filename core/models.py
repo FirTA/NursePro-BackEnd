@@ -1,3 +1,4 @@
+import os
 from django.db import models
 from django.utils import timezone
 from django.contrib.auth.models import AbstractUser
@@ -6,8 +7,8 @@ from django.core.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-
-
+from django.utils.timezone import localtime
+from django.core.files.storage import default_storage
 # Create your models here.
 
 class Roles(models.Model):
@@ -184,19 +185,69 @@ class Consultations(models.Model):
         ordering = ['scheduled_date']
         db_table = 'consultations'
 
-class ConsultationMaterials(models.Model):
-    consultation = models.ForeignKey(Consultations, on_delete=models.SET_NULL, null=True)
-    title = models.CharField(max_length=200)
-    description = models.TextField()
+class Materials(models.Model):
+    title = models.CharField(max_length=200, null=True, blank=True)
     file_path = models.FileField(upload_to="documnets/")
+    size = models.PositiveBigIntegerField(editable=True, null=True, blank=True)
+    size_readable = models.CharField(max_length=20, editable=True, null=True, blank=True)  # human-readable size
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+    def save(self, *args, **kwargs):
+        # Save the object first so the file is available
+
+        
+        if self.file_path and not self.title:
+            self.title = os.path.basename(self.file_path.name)
+        super().save(*args,**kwargs)
+        
+        if self.file_path:
+            file_path = self.file_path.path
+            print(self.file_path,file_path)
+            if os.path.exists(file_path):
+                self.size  = os.path.getsize(file_path)
+                self.size_readable = self._calculate_human_readable_size(self.size)
+                super().save(update_fields=["size", "size_readable"])
+
+    def delete(self, *args, **kwargs):
+        """Delete file from storage when instance is deleted."""
+        if self.file_path:
+            file_path = self.file_path.path
+            if os.path.exists(file_path):
+                default_storage.delete(file_path)
+        super().delete(*args, **kwargs)
+    
+    @property
+    def formatted_created_at(self):
+       return localtime(self.created_at).strftime('%d/%m/%Y, %H:%M')     
+                            
+    def _calculate_human_readable_size(self, size):
+        """Convert size in bytes to a human-readable format."""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024:
+                return f"{size:.2f} {unit}"
+            size /= 1024
+        return f"{size:.2f} PB"
+    
+    def __str__(self):
+        return f"{self.title} ({self.size_readable})"
+    
+    class Meta:
+        db_table = 'materials'
+
+class CounselingMaterials(models.Model):
+    counseling = models.ForeignKey(Consultations, on_delete=models.CASCADE, null=True)
+    description = models.TextField()
+    file = models.ManyToManyField(Materials,related_name="counseling_materials")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
  
     def __str__(self):
-        return self.title   
+        return self.counseling.title   
     
     class Meta:
-        db_table = 'consultation_materials'
+        db_table = 'counseling_materials'
+        
 
 class ConsultationResult(models.Model):
     consultation = models.ForeignKey(Consultations, on_delete=models.CASCADE)
@@ -210,7 +261,7 @@ class ConsultationResult(models.Model):
         db_table = 'consultation_result'
         
 class MaterialReadStatus(models.Model):
-    consultation_materials = models.ForeignKey(ConsultationMaterials, on_delete=models.SET_NULL, null=True)
+    consultation_materials = models.ForeignKey(CounselingMaterials, on_delete=models.SET_NULL, null=True)
     nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
     read_at = models.DateTimeField()
     
