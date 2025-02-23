@@ -4,7 +4,7 @@ from django.db import transaction
 from django.dispatch import receiver
 from core.models import (
     CounselingMaterials,
-    Materials,
+    Materials,Counseling
 )
 
 @receiver(pre_delete, sender=CounselingMaterials)
@@ -25,6 +25,13 @@ def auto_delete_materials(sender, instance, action, pk_set, **kwargs):
         transaction.on_commit(
             lambda: delete_unused_materials(pk_set)
         )
+
+@receiver(m2m_changed, sender=Counseling.material_files.through)
+def handle_materials_change(sender, instance, action, pk_set, **kwargs):
+    """Handle material deletions when removed from consultation"""
+    if action == "pre_remove" and pk_set:
+        Materials.objects.filter(id__in=pk_set).delete()
+
 
 def delete_unused_materials(material_ids=None):
     query = Materials.objects.annotate(

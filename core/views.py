@@ -1,3 +1,4 @@
+import base64
 import jwt
 import datetime
 
@@ -27,11 +28,10 @@ from .serializers import (
     DepartmentSerializer,
     LevelReferenceSerializer,
     LevelUpgradeStatusSerializer,
-    LevelHistorySerializer,
     LevelRequestUpdateSerializer,
-    ConsultationTypesSerializer,
-    ConsultationStatusSerializer,
-    ConsultationSerializer,
+    CounselingTypesSerializer,
+    CounselingStatusSerializer,
+    CounselingSerializer,
     ConsultationResultSerializer,
     CounselingMaterialSerializer,
     MaterialReadStatusSerializers,
@@ -39,6 +39,7 @@ from .serializers import (
     ManagementSerializers,
     SystemConfigurationSerializers,
     CounselingMaterialCreateSerializer,
+    UserProfileSerializer,
 )
 from .models import (
     User,
@@ -48,17 +49,18 @@ from .models import (
     LevelUpgradeStatus,
     LevelUpgradeRequests,
     Department,
-    Consultations,
-    ConsultationStatus,
-    ConsultationTypes,
-    ConsultationResult,
+    Counseling,
+    CounselingStatus,
+    CounselingTypes,
+    CounselingResult,
     CounselingMaterials,
     MaterialReadStatus,
     LevelHistory,
     SystemConfiguration,
     AuditLog,
+    Materials
 )
-
+from rest_framework.decorators import api_view, permission_classes
 from django.utils.decorators import method_decorator
 from rest_framework.decorators import api_view
 from django.views.decorators.csrf import csrf_exempt
@@ -70,6 +72,46 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from rest_framework_simplejwt.tokens import RefreshToken
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_profile(request):
+    try:
+        user = request.user
+        serializer = UserProfileSerializer(user)
+        return Response(serializer.data)
+    except Exception as e:
+        return Response({
+            'error': str(e)
+        }, status=500)
+        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_profile_page(request):
+    serializer = UserProfileSerializer(request.user)
+    return Response(serializer.data)
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_user_profile(request):
+    serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=400)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def update_profile_picture(request):
+    if 'profile_picture' not in request.FILES:
+        return Response({'error': 'No image provided'}, status=400)
+    
+    user = request.user
+    user.profile_picture = request.FILES['profile_picture'].read()
+    user.save()
+    
+    serializer = UserProfileSerializer(user)
+    return Response(serializer.data)
 
 class CustomTokenRefresh(TokenRefreshView):
   def post(self, request, *args, **kwargs):
@@ -146,9 +188,6 @@ class LoginView(GenericAPIView):
         serializer.is_valid(raise_exception=True)
         print(serializer.validated_data)
         response = Response(serializer.validated_data, status=status.HTTP_200_OK)
-        # response["Access-Control-Allow-Origin"] = "*"
-        # response["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        # response["Access-Control-Allow-Headers"] = "Content-Type"
         return response
 
 
@@ -173,59 +212,6 @@ class LogoutApiView(GenericAPIView):
         serializer.save()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-class TestAuthView(GenericAPIView):
-    permission_classes = [IsAuthenticated]
-    # authentication_classes = [JWTAuthentication]  
-    
-    def get(self, request):
-        # token = "your_access_token"
-        
-        print(request.user.role.role_name)
-        if request.user.role.role_name != 'Nurse':
-            return Response({'error' : 'Only nurses can view their current level'},status=status.HTTP_403_FORBIDDEN)
-
-        # print(request.data)
-        decoded_token = AccessToken(request.data['access_token'])
-        user_id = decoded_token.payload['user_id']
-        # print(decoded_token.payload)
-        nurse_id = Nurse.objects.get(user_id = user_id)
-        print(f"user_id : {nurse_id} ")
-        consultation_list = Consultations.objects.filter(nurses_id = nurse_id)
-        
-        for consultation_item in consultation_list:
-            print(f"{consultation_item} - {consultation_item.management}")
-        data = {
-            'msg' : 'its workds',
-            # 'tokem' : decoded_token
-        }
-        # print(decoded_token)  # Example of getting user ID from the token
-        
-        return Response(status=status.HTTP_200_OK)
-
-class LevelReferenceViewSet(viewsets.ModelViewSet):
-    queryset = LevelReference.objects.all()
-    serializer_class = LevelReferenceSerializer
-    permission_classes = [IsAuthenticated]
-    
-class LevelUpgradeStatusViewSet(viewsets.ModelViewSet):
-    queryset = LevelUpgradeStatus.objects.all()
-    serializer_class = LevelUpgradeStatusSerializer
-    permission_classes = [IsAuthenticated]
-    
-class DepartmentViewSet(viewsets.ModelViewSet):
-    queryset = Department.objects.all()
-    serializer_class = DepartmentSerializer
-    permission_classes = [IsAuthenticated]
-    
-class ConsultationStatusViewSet(viewsets.ModelViewSet):
-    queryset = ConsultationStatus.objects.all()
-    serializer_class = ConsultationStatusSerializer
-    permission_classes = [IsAuthenticated]
-    
-class ConsultationTypesViewSet(viewsets.ModelViewSet):
-    queryset = ConsultationTypes.objects.all()
-    serializer_class = ConsultationTypesSerializer
-    permission_classes = [IsAuthenticated]
     
 class ChangePasswordView(generics.UpdateAPIView):
     serializer_class = ChangePasswordSerializer
@@ -303,9 +289,9 @@ class NurseViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         queryset = Nurse.objects.select_related('user', 'current_level')
-        if self.request.user.role == 'management':
-            return queryset.filter(user__department=self.request.user.department)
-        elif self.request.user.role == 'admin':
+        if self.request.user.role.name == 'Management':
+            return queryset.all()
+        elif self.request.user.role.name == 'admin' :
             return queryset.all()
         
         return queryset.filter(user=self.request.user)
@@ -330,19 +316,34 @@ class NurseLevelView(APIView):
         print(serializer.data['next_level'])
         return Response(serializer.data['next_level'],status=status.HTTP_200_OK)
 
-class LevelHistoryViewSet(viewsets.ModelViewSet):
+
+class CounselingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-    queryset = LevelHistory.objects.all()
-    serializer_class = LevelHistorySerializer
+    queryset = Counseling.objects.all()
+    serializer_class = CounselingSerializer
     
-class ConsultationsViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
-    queryset = Consultations.objects.all()
-    serializer_class = ConsultationSerializer
+    def perform_create(self, serializer):
+        serializer.save(management=self.request.user.management)
+
+    @action(detail=True, methods=['post'])
+    def remove_file(self, request, pk=None):
+        counseling = self.get_object()
+        file_id = request.data.get('file_id')
+        
+        try:
+            material = counseling.material_files.get(id=file_id)
+            counseling.material_files.remove(material)
+            # Signal will handle the file deletion
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Materials.DoesNotExist:
+            return Response(
+                {"detail": "File not found"}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
             
 class ConsultationResultViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-    queryset = ConsultationResult.objects.all()
+    queryset = CounselingResult.objects.all()
     serializer_class = ConsultationResultSerializer
             
 class CounselingMaterialsViewSet(viewsets.ModelViewSet):
@@ -381,7 +382,62 @@ class ManagementViewSet(viewsets.ModelViewSet):
     queryset = Management.objects.all()
     serializer_class = ManagementSerializers
             
-            
+         
+         
+         
+class TestAuthView(GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    # authentication_classes = [JWTAuthentication]  
+    
+    def get(self, request):
+        # token = "your_access_token"
+        
+        print(request.user.role.role_name)
+        if request.user.role.role_name != 'Nurse':
+            return Response({'error' : 'Only nurses can view their current level'},status=status.HTTP_403_FORBIDDEN)
+
+        # print(request.data)
+        decoded_token = AccessToken(request.data['access_token'])
+        user_id = decoded_token.payload['user_id']
+        # print(decoded_token.payload)
+        nurse_id = Nurse.objects.get(user_id = user_id)
+        print(f"user_id : {nurse_id} ")
+        consultation_list = Counseling.objects.filter(nurses_id = nurse_id)
+        
+        for consultation_item in consultation_list:
+            print(f"{consultation_item} - {consultation_item.management}")
+        data = {
+            'msg' : 'its workds',
+            # 'tokem' : decoded_token
+        }
+        # print(decoded_token)  # Example of getting user ID from the token
+        
+        return Response(status=status.HTTP_200_OK)
+
+class LevelReferenceViewSet(viewsets.ModelViewSet):
+    queryset = LevelReference.objects.all()
+    serializer_class = LevelReferenceSerializer
+    permission_classes = [IsAuthenticated]
+    
+class LevelUpgradeStatusViewSet(viewsets.ModelViewSet):
+    queryset = LevelUpgradeStatus.objects.all()
+    serializer_class = LevelUpgradeStatusSerializer
+    permission_classes = [IsAuthenticated]
+    
+class DepartmentViewSet(viewsets.ModelViewSet):
+    queryset = Department.objects.all()
+    serializer_class = DepartmentSerializer
+    permission_classes = [IsAuthenticated]
+    
+class ConsultationStatusViewSet(viewsets.ModelViewSet):
+    queryset = CounselingStatus.objects.all()
+    serializer_class = CounselingStatusSerializer
+    permission_classes = [IsAuthenticated]
+    
+class ConsultationTypesViewSet(viewsets.ModelViewSet):
+    queryset = CounselingTypes.objects.all()
+    serializer_class = CounselingTypesSerializer
+    permission_classes = [IsAuthenticated]   
 # # Create your views here.
 # class ConsultationViewSet(viewsets.ModelViewSet):
 #     serializer_class = ConsultationSerializers

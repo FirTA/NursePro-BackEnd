@@ -9,14 +9,16 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils.timezone import localtime
 from django.core.files.storage import default_storage
+from dateutil.relativedelta import relativedelta
+from django.utils import timezone
 # Create your models here.
 
 class Roles(models.Model):
-    role_name = models.CharField(50)
+    name = models.CharField(50)
     created_at = models.DateTimeField(default=timezone.now, null=False)
         
     def __str__(self):
-        return self.role_name
+        return self.name
     
     class Meta:
         db_table = 'roles'
@@ -26,6 +28,7 @@ class User(AbstractUser):
     email_verified = models.BooleanField(default=False)
     role = models.ForeignKey(Roles, on_delete=models.SET_NULL, null=True)
     phone = models.CharField(max_length=16, blank=True)
+    profile_picture = models.BinaryField(null=True, blank=True)
     is_login = models.BooleanField(default=False)
     reset_password_token = models.CharField(max_length=100, blank=True, null=True)
     reset_password_expire = models.DateTimeField(blank=True, null=True)
@@ -63,7 +66,7 @@ class LevelReference(models.Model):
         return LevelReference.objects.filter(id__gt=self.id).first()
            
 class Department(models.Model):
-    department = models.CharField(max_length=100)
+    name = models.CharField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
     update_at = models.DateTimeField(auto_now_add=True)
     
@@ -71,16 +74,15 @@ class Department(models.Model):
         db_table = 'department'    
     
     def __str__(self):
-        return self.department
+        return self.name
 
 class Nurse(models.Model):
     nurse_account_id = models.CharField(max_length=50, null=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE)
-    profile_picture = models.BinaryField(null=True, blank=True)
     current_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True)
     hire_date = models.DateField()
     years_of_service = models.IntegerField()
-    level_upgrade_date = models.DateField(auto_now=True)
+    level_upgrade_date = models.DateField(null=True)
     department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True)
     specialization = models.CharField(max_length=100, blank=True)
     is_active = models.BooleanField(default=True)
@@ -89,6 +91,63 @@ class Nurse(models.Model):
 
     def __str__(self):
         return self.nurse_account_id + " - " + self.user.first_name + " " + self.user.last_name
+
+    def calculate_years_of_service(self):
+        if self.hire_date:
+            today = timezone.now().date()
+            difference = relativedelta(today, self.hire_date)
+            # Convert to total months
+            return (difference.years * 12) + difference.months
+        return 0
+    
+    def should_upgrade_level(self):
+        """Check if nurse should be upgraded based on level_upgrade_date"""
+        if self.level_upgrade_date and self.current_level:
+            return timezone.now().date() >= self.level_upgrade_date
+        return False
+    
+    def get_next_level(self):
+        """Get the next level from LevelReference"""
+        if self.current_level:
+            next_level = LevelReference.objects.filter(
+                level=self.current_level.next_level
+            ).first()
+            return next_level
+        return None
+    
+    def update_level_and_date(self):
+        """Update current level and calculate new upgrade date"""
+        next_level = self.get_next_level()
+        if next_level:
+            # Create level history record
+            LevelHistory.objects.create(
+                nurse=self,
+                from_level=self.current_level,
+                to_level=next_level,
+                years_of_service=self.years_of_service,
+                status=LevelUpgradeStatus.objects.get(status_name='Automatic')  # You'll need this status in your DB
+            )
+            
+            # Update to new level
+            self.current_level = next_level
+            
+            # Calculate new upgrade date
+            self.level_upgrade_date = timezone.now().date() + relativedelta(months=next_level.required_time_in_month)
+
+    def save(self, *args, **kwargs):
+        
+        if not self.pk:  # New nurse
+            super().save(*args, **kwargs)
+        else:  # Existing nurse
+            if self.should_upgrade_level():
+                self.update_level_and_date()
+        
+        self.years_of_service = self.calculate_years_of_service()
+        if self.hire_date and self.current_level:
+            required_months = self.current_level.required_time_in_month
+            self.level_upgrade_date = self.hire_date + relativedelta(months=required_months)
+            
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ['nurse_account_id']
@@ -142,7 +201,7 @@ class Management(models.Model):
         ordering = ['management_account_id']
         db_table = 'management'
     
-class ConsultationTypes(models.Model):
+class CounselingTypes(models.Model):
     name = models.CharField(max_length=100,null=False)
     description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -152,11 +211,11 @@ class ConsultationTypes(models.Model):
         return self.name
     
     class Meta:
-        db_table = 'consultation_type'
+        db_table = 'counseling_type'
 
-class ConsultationStatus(models.Model):
+class CounselingStatus(models.Model):
     name = models.CharField(max_length=100,null=False)
-    description = models.TextField()
+    description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     update_at = models.DateTimeField(auto_now_add=True)
     
@@ -165,26 +224,8 @@ class ConsultationStatus(models.Model):
     
     
     class Meta:
-        db_table = 'consultation_status'    
-       
-class Consultations(models.Model):
-    title = models.CharField(max_length=200,null=False)
-    nurses_id = models.ManyToManyField(Nurse)
-    management = models.ForeignKey(Management, on_delete=models.SET_NULL, null=True)
-    consultation_type = models.ForeignKey(ConsultationTypes, on_delete=models.SET_NULL, null=True)
-    description = models.TextField(blank=True)
-    scheduled_date = models.DateTimeField()
-    status = models.ForeignKey(ConsultationStatus, on_delete=models.SET_NULL, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.title
-
-    class Meta:
-        ordering = ['scheduled_date']
-        db_table = 'consultations'
-
+        db_table = 'counseling_status'    
+        
 class Materials(models.Model):
     title = models.CharField(max_length=200, null=True, blank=True)
     file_path = models.FileField(upload_to="documnets/")
@@ -234,9 +275,31 @@ class Materials(models.Model):
     
     class Meta:
         db_table = 'materials'
+       
+class Counseling(models.Model):
+    title = models.CharField(max_length=200,null=False)
+    nurses_id = models.ManyToManyField(Nurse)
+    management = models.ForeignKey(Management, on_delete=models.SET_NULL, null=True)
+    counseling_type = models.ForeignKey(CounselingTypes, on_delete=models.SET_NULL, null=True)
+    description = models.TextField(blank=True)
+    scheduled_date = models.DateTimeField()
+    status = models.ForeignKey(CounselingStatus, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    material_description = models.TextField(blank=True, null=True)
+    material_files = models.ManyToManyField(Materials, related_name='counseling')
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['scheduled_date']
+        db_table = 'counseling'
+
+
 
 class CounselingMaterials(models.Model):
-    counseling = models.ForeignKey(Consultations, on_delete=models.CASCADE, null=True)
+    counseling = models.ForeignKey(Counseling, on_delete=models.CASCADE, null=True)
     description = models.TextField()
     file = models.ManyToManyField(Materials,related_name="counseling_materials")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -249,8 +312,8 @@ class CounselingMaterials(models.Model):
         db_table = 'counseling_materials'
         
 
-class ConsultationResult(models.Model):
-    consultation = models.ForeignKey(Consultations, on_delete=models.CASCADE)
+class CounselingResult(models.Model):
+    consultation = models.ForeignKey(Counseling, on_delete=models.CASCADE)
     nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
     nurse_feedback = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -258,7 +321,7 @@ class ConsultationResult(models.Model):
     
     
     class Meta:
-        db_table = 'consultation_result'
+        db_table = 'counseling_result'
         
 class MaterialReadStatus(models.Model):
     consultation_materials = models.ForeignKey(CounselingMaterials, on_delete=models.SET_NULL, null=True)

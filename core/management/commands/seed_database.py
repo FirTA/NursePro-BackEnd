@@ -7,8 +7,8 @@ import faker
 
 from core.models import (
     Roles, User, Department, LevelReferences, 
-    Nurse, Management, ConsultationTypes, 
-    ConsultationStatus, Consultations, 
+    Nurse, Management, CounselingTypes, 
+    CounselingStatus, Counseling, 
     CounselingMaterials, LevelUpgradeStatus, 
     LevelUpgradeRequests, SystemConfiguration
 )
@@ -20,8 +20,8 @@ class Command(BaseCommand):
         # Clear existing data
         models_to_clear = [
             Roles, User, Department, LevelReferences, 
-            Nurse, Management, ConsultationTypes, 
-            ConsultationStatus, Consultations, 
+            Nurse, Management, CounselingTypes, 
+            CounselingStatus, Counseling, 
             CounselingMaterials, LevelUpgradeStatus, 
             LevelUpgradeRequests, SystemConfiguration
         ]
@@ -51,11 +51,11 @@ class Command(BaseCommand):
 
         # Seed Consultation Types
         consultation_types = [
-            ConsultationTypes.objects.create(
+            CounselingTypes.objects.create(
                 name='Regular Consultation', 
                 description='Routine professional development consultation'
             ),
-            ConsultationTypes.objects.create(
+            CounselingTypes.objects.create(
                 name='Violation Follow-up', 
                 description='Consultation to address professional conduct issues'
             )
@@ -63,15 +63,15 @@ class Command(BaseCommand):
 
         # Seed Consultation Status
         consultation_statuses = [
-            ConsultationStatus.objects.create(
+            CounselingStatus.objects.create(
                 name='Scheduled', 
                 description='Consultation is planned and upcoming'
             ),
-            ConsultationStatus.objects.create(
+            CounselingStatus.objects.create(
                 name='In Progress', 
                 description='Consultation is currently happening'
             ),
-            ConsultationStatus.objects.create(
+            CounselingStatus.objects.create(
                 name='Completed', 
                 description='Consultation has been finished'
             )
@@ -151,7 +151,7 @@ class Command(BaseCommand):
         # Generate Consultations
         consultations = []
         for i in range(20):
-            consultation = Consultations.objects.create(
+            consultation = Counseling.objects.create(
                 title=f'Consultation {i+1}',
                 management=random.choice(management_users),
                 consultation_type=random.choice(consultation_types),

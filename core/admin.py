@@ -1,54 +1,117 @@
 from django.contrib import admin
-from .models import (
-    User,
-    Nurse,
-    Management,
-    Department,
-    LevelReference,
-    LevelHistory,
-    LevelUpgradeRequests,
-    LevelUpgradeStatus,
-    MaterialReadStatus,
-    CounselingMaterials,
-    ConsultationResult,
-    Consultations,
-    ConsultationTypes,
-    ConsultationStatus,
-    AuditLog,
-    SystemConfiguration,
-    Materials
-)
-from django.utils.safestring import mark_safe
-# Register your models here.
+from .models import *
 
-admin.site.register(User)
-admin.site.register(Nurse)
-admin.site.register(Management)
-admin.site.register(Department)
-admin.site.register(LevelReference)
-admin.site.register(LevelUpgradeRequests)
-admin.site.register(LevelHistory)
-admin.site.register(LevelUpgradeStatus)
-admin.site.register(MaterialReadStatus)
-admin.site.register(Consultations)
-admin.site.register(ConsultationResult)
-admin.site.register(ConsultationTypes)
-admin.site.register(ConsultationStatus)
-admin.site.register(AuditLog)
-admin.site.register(SystemConfiguration)
-# admin.site.register(Materials)
+@admin.register(Roles)
+class RolesAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
+
+@admin.register(User)
+class UserAdmin(admin.ModelAdmin):
+    list_display = ('username', 'email', 'role', 'is_active', 'is_login', 'created_at')
+    list_filter = ('role', 'is_active', 'is_login')
+    search_fields = ('username', 'email', 'first_name', 'last_name')
+
+@admin.register(LevelReference)
+class LevelReferenceAdmin(admin.ModelAdmin):
+    list_display = ('level', 'next_level', 'required_time_in_month', 'created_at')
+    search_fields = ('level', 'next_level')
+
+@admin.register(Department)
+class DepartmentAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
+
+@admin.register(Nurse)
+class NurseAdmin(admin.ModelAdmin):
+    list_display = ('nurse_account_id', 'user', 'current_level', 'hire_date', 
+                   'years_of_service', 'level_upgrade_date', 'department', 'is_active')
+    list_filter = ('current_level', 'department', 'is_active')
+    search_fields = ('nurse_account_id', 'user__username', 'user__email')
+    readonly_fields = ('years_of_service', 'level_upgrade_date')  # Make these read-only since they're auto-calculated
+    
+@admin.register(LevelUpgradeStatus)
+class LevelUpgradeStatusAdmin(admin.ModelAdmin):
+    list_display = ('status_name', 'created_at')
+    search_fields = ('status_name',)
+
+@admin.register(LevelHistory)
+class LevelHistoryAdmin(admin.ModelAdmin):
+    list_display = ('nurse', 'from_level', 'to_level', 'change_date', 'status')
+    list_filter = ('from_level', 'to_level', 'status')
+    search_fields = ('nurse__nurse_account_id',)
+
+@admin.register(Management)
+class ManagementAdmin(admin.ModelAdmin):
+    list_display = ('management_account_id', 'user', 'department', 'position', 'is_active')
+    list_filter = ('department', 'is_active')
+    search_fields = ('management_account_id', 'user__username', 'position')
+
+@admin.register(CounselingTypes)
+class CounselingTypesAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
+
+@admin.register(CounselingStatus)
+class CounselingStatusAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at')
+    search_fields = ('name',)
 
 @admin.register(Materials)
 class MaterialsAdmin(admin.ModelAdmin):
-    list_display = ("title", "file_path", "size", "size_readable","created_at")  # Make sure size_readable is here
+    list_display = ('title', 'file_path', 'size', 'size_readable', 'created_at')
+    search_fields = ('title',)
+    readonly_fields = ('size', 'size_readable')
 
+@admin.register(Counseling)
+class CounselingAdmin(admin.ModelAdmin):
+    list_display = ('title', 'management', 'counseling_type', 'scheduled_date', 'status')
+    list_filter = ('counseling_type', 'status')
+    search_fields = ('title', 'management__management_account_id')
+    filter_horizontal = ('nurses_id', 'material_files')
 
 @admin.register(CounselingMaterials)
-class MaterialsAdmin(admin.ModelAdmin):
-    list_display = ("counseling", "description", "get_files", "created_at","updated_at")  # Make sure size_readable is here
-    
-    def get_files(self, obj):
-        """Display all related file names as a comma-separated list."""
-        files = [file.title for file in obj.file.all()]
-        return mark_safe("<br>".join(files)) if files else "-"  # Assuming `file` is ManyToManyField with `Materials`
-    get_files.short_description = "Files"
+class CounselingMaterialsAdmin(admin.ModelAdmin):
+    list_display = ('counseling', 'created_at')
+    search_fields = ('counseling__title',)
+    filter_horizontal = ('file',)
+
+@admin.register(CounselingResult)
+class CounselingResultAdmin(admin.ModelAdmin):
+    list_display = ('consultation', 'nurse', 'created_at')
+    list_filter = ('consultation__status',)
+    search_fields = ('consultation__title', 'nurse__nurse_account_id')
+
+@admin.register(MaterialReadStatus)
+class MaterialReadStatusAdmin(admin.ModelAdmin):
+    list_display = ('consultation_materials', 'nurse', 'read_at')
+    list_filter = ('read_at',)
+    search_fields = ('nurse__nurse_account_id',)
+
+@admin.register(LevelUpgradeRequests)
+class LevelUpgradeRequestsAdmin(admin.ModelAdmin):
+    list_display = ('nurse', 'management', 'requested_level', 'current_level', 'status', 'is_approve', 'request_date')
+    list_filter = ('status', 'is_approve')
+    search_fields = ('nurse__nurse_account_id', 'management__management_account_id')
+
+@admin.register(Notificaitons)
+class NotificaitonsAdmin(admin.ModelAdmin):
+    list_display = ('user', 'message', 'created_at')
+    search_fields = ('user__username', 'message')
+
+@admin.register(AuditLog)
+class AuditLogAdmin(admin.ModelAdmin):
+    list_display = ('user', 'action_type', 'table_name', 'record_id', 'ip_address', 'timestamp')
+    list_filter = ('action_type', 'table_name')
+    search_fields = ('user__username', 'table_name')
+
+@admin.register(LoginHistory)
+class LoginHistoryAdmin(admin.ModelAdmin):
+    list_display = ('user', 'login_time', 'logout_time', 'ip_address', 'device_info', 'status')
+    list_filter = ('status',)
+    search_fields = ('user__username', 'ip_address')
+
+@admin.register(SystemConfiguration)
+class SystemConfigurationAdmin(admin.ModelAdmin):
+    list_display = ('config_key', 'config_value', 'created_at')
+    search_fields = ('config_key',)

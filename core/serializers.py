@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.utils import timezone
-
+import base64
 from django.contrib.auth import authenticate
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
@@ -16,11 +16,11 @@ from .models import (
     Nurse,
     MaterialReadStatus,
     Department,
-    Consultations,
-    ConsultationTypes,
-    ConsultationStatus,
+    Counseling,
+    CounselingTypes,
+    CounselingStatus,
     CounselingMaterials,
-    ConsultationResult,
+    CounselingResult,
     SystemConfiguration,
     AuditLog,
     Materials    
@@ -111,14 +111,14 @@ class LoginSerializer(serializers.ModelSerializer):
         # if not user.is_verified:
         #     raise AuthenticationFailed("Email is not verified")
         # print(user.role.role_name)
-        tokens=generate_tokens(user, username, user.role.role_name)
+        tokens=generate_tokens(user, username, user.role.name)
         user.is_login = True
         user.save()
         
         return {
             'user_id'       : user.pk,
             'username'      : user.username,
-            'role'          : user.role.role_name,
+            'role'          : user.role.name,
             "access_token"  : str(tokens['access']),
             "refresh_token" : str(tokens['refresh']),
         }
@@ -168,7 +168,12 @@ class ResetPasswordConfirmSerializer(serializers.Serializer):
         if attrs['new_password'] != attrs['new_password2']:
             raise serializers.ValidationError({"new_password": "Password fields didn't match."})
         return attrs
-
+        
+class DepartmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Department
+        fields = ['id', 'name']
+        
 class UserSerializer(serializers.ModelSerializer):
     class Meta :
         model = User
@@ -176,14 +181,52 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ['role']
         
 class NurseSerializer(serializers.ModelSerializer):
-    user = UserSerializer().data.get('username')
-    current_level_name = serializers.CharField(source='current_level.name', read_only=True)
-    
-    
+    department = DepartmentSerializer()
+    name = serializers.SerializerMethodField()
+    level = serializers.CharField(source='current_level.level', read_only=True)
+
     class Meta:
         model = Nurse
-        fields = ['id', 'user', 'current_level', 'current_level_name', 'specialization', 'is_active']
-             
+        fields = ['id','nurse_account_id', 'name', 'level','department', 'level_upgrade_date', 'years_of_service','specialization','is_active']
+
+    def get_name(self, obj):
+        return f"Ns. {obj.user.first_name} {obj.user.last_name}"
+
+class ManagementSerializer(serializers.ModelSerializer):
+    department = DepartmentSerializer()
+
+    class Meta:
+        model = Management
+        fields = ['management_account_id', 'position', 'department']
+
+class RoleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Roles
+        fields = ['id', 'name']
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    role = RoleSerializer()
+    nurse = NurseSerializer()
+    management = ManagementSerializer()
+    class Meta:
+        model = User
+        fields = [
+            'id', 
+            'first_name', 
+            'last_name',
+            'phone', 
+            'email', 
+            'role', 
+            'nurse', 
+            'management',
+            'profile_picture',
+        ]
+
+    def get_profile_picture(self, obj):
+        if obj.profile_picture:
+            return base64.b64encode(obj.profile_picture).decode()
+        return None
+
 class UserCreateSerializer(serializers.ModelSerializer):
     nurse_id = serializers.CharField(required=True)
     
@@ -251,16 +294,9 @@ class LevelReferenceSerializer(serializers.ModelSerializer):
         model = LevelReference
         fields = ['id','level','next_level','required_time_in_month', 'created_at', 'update_at']
         read_only_fields = ['created_at','updated_at']
-    
-class LevelHistorySerializer(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = LevelHistory
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
-        
+
+
+
 class LevelUpgradeStatusSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
     update_at = serializers.DateTimeField(default=timezone.now)    
@@ -269,38 +305,19 @@ class LevelUpgradeStatusSerializer(serializers.ModelSerializer):
         model = LevelUpgradeStatus
         fields = '__all__'
         read_only_fields = ['created_at','updated_at']
-        
-class DepartmentSerializer(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = Department
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
 
-class ConsultationTypesSerializer(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = ConsultationTypes
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
-        
-class ConsultationStatusSerializer(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = ConsultationStatus
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
-                       
 
-"""
-Level Upgrade
-"""          
+class CounselingTypesSerializer(serializers.ModelSerializer): 
+    
+    class Meta:
+        model = CounselingTypes
+        fields = ['id','name']
+        
+class CounselingStatusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CounselingStatus
+        fields = ['id','name']
+     
 class LevelRequestUpdateSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
     update_at = serializers.DateTimeField(default=timezone.now)    
@@ -309,27 +326,101 @@ class LevelRequestUpdateSerializer(serializers.ModelSerializer):
         model = LevelUpgradeRequests
         fields = 'nurse'
         read_only_fields = ['created_at','updated_at']
-                       
-class ConsultationSerializer(serializers.ModelSerializer):
-    nurses = NurseSerializer(many=True, source = 'nurses_id')  # Karena ManyToManyField
-    created_at = serializers.DateTimeField(default=timezone.now)
-    updated_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = Consultations
-        fields = ['title', 'nurses','created_at','updated_at']
-        read_only_fields = ['created_at','updated_at']
-        
-class CounselingSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Consultations
-        fields = ["title"]
 
 class MaterialSerializer(serializers.ModelSerializer):
     class Meta:
         model = Materials
-        fields = ["title","file_path","size_readable","created_at"]
+        fields = ["id","title","file_path","size_readable","created_at"]
+        read_only_fields = ['size_readable','created_at']
+    def validate_file_path(self, value):
+        if value.content_type != 'application/pdf':
+            raise serializers.ValidationError("Only PDF files are allowed")
+        return value
 
+class ManagementSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Management
+        fields = ['management_account_id', 'position', 'name']
+
+    def get_name(self, obj):
+        return f"{obj.user.first_name} {obj.user.last_name}"
+
+class NurseDetailSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    level = serializers.CharField(source='current_level.name', read_only=True)
+
+    class Meta:
+        model = Nurse
+        fields = ['id','nurse_account_id', 'name', 'level']
+
+    def get_name(self, obj):
+        return f"Ns. {obj.user.first_name} {obj.user.last_name}"
+                       
+class CounselingSerializer(serializers.ModelSerializer):
+    nurses = NurseDetailSerializer(source='nurses_id', many=True, read_only=True)
+    nurse_ids = serializers.PrimaryKeyRelatedField(
+        source='nurses_id',
+        queryset=Nurse.objects.all(),
+        many=True,
+        required=False  # Made optional to fix the empty nurses issue
+    )
+    management = ManagementSerializer(read_only=True)
+    materials_files = MaterialSerializer(source='material_files', many=True, read_only=True)
+    uploaded_files = serializers.ListField(
+        child=serializers.FileField(max_length=100000),
+        write_only=True,
+        required=False
+    )
+    status_display = serializers.CharField(source='status.name', read_only=True)
+    counseling_type_display = serializers.CharField(source='counseling_type.name', read_only=True)
+
+    class Meta:
+        model = Counseling
+        fields = [
+            'id', 'title', 'description', 'nurses', 'nurse_ids',
+            'management', 'counseling_type', 'counseling_type_display',
+            'status', 'status_display', 'scheduled_date',
+            'material_description', 'materials_files', 'uploaded_files',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def create(self, validated_data):
+        nurses = validated_data.pop('nurses_id', [])
+        uploaded_files = validated_data.pop('uploaded_files', [])
+        
+        counseling = Counseling.objects.create(**validated_data)
+        if nurses:  # Add check for nurses
+            counseling.nurses_id.set(nurses)
+            
+        for file in uploaded_files:
+            material = Materials.objects.create(file_path=file)
+            counseling.material_files.add(material)
+        return counseling
+
+    def update(self, instance, validated_data):
+        nurses = validated_data.pop('nurses_id', None)  # Changed from [] to None
+        uploaded_files = validated_data.pop('uploaded_files', [])
+        
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        if nurses is not None:  # Only update nurses if provided
+            instance.nurses_id.set(nurses)
+        
+        # Handle files
+        if uploaded_files:  # Only handle files if new ones are uploaded
+            for file in uploaded_files:
+                material = Materials.objects.create(file_path=file)
+                instance.material_files.add(material)
+        
+        instance.save()
+        return instance
+
+
+        
 class CounselingMaterialSerializer(serializers.ModelSerializer):
     counseling_title = serializers.CharField( source = 'counseling.title',read_only = True)
     file = MaterialSerializer(many = True)
@@ -384,7 +475,7 @@ class ConsultationResultSerializer(serializers.ModelSerializer):
     update_at = serializers.DateTimeField(default=timezone.now)    
     
     class Meta:
-        model = ConsultationResult
+        model = CounselingResult
         fields = '__all__'
         read_only_fields = ['created_at','updated_at']
         
