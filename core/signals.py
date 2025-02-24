@@ -3,28 +3,9 @@ from django.db.models import Count
 from django.db import transaction
 from django.dispatch import receiver
 from core.models import (
-    CounselingMaterials,
     Materials,Counseling
 )
 
-@receiver(pre_delete, sender=CounselingMaterials)
-def delete_related_materials(sender, instance, **kwargs):
-    """
-    Deletes all materials associated with the deleted CounselingMaterials instance
-    if they are not linked to any other CounselingMaterials
-    """
-    
-    related_files = instance.file.all()
-    for material in related_files:
-        material.delete()
-
-@receiver(m2m_changed, sender=CounselingMaterials.file.through)
-def auto_delete_materials(sender, instance, action, pk_set, **kwargs):
-    if action == "post_remove":
-        # Only check the specific materials that were removed
-        transaction.on_commit(
-            lambda: delete_unused_materials(pk_set)
-        )
 
 @receiver(m2m_changed, sender=Counseling.material_files.through)
 def handle_materials_change(sender, instance, action, pk_set, **kwargs):

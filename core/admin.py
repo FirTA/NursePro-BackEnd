@@ -35,12 +35,6 @@ class LevelUpgradeStatusAdmin(admin.ModelAdmin):
     list_display = ('status_name', 'created_at')
     search_fields = ('status_name',)
 
-@admin.register(LevelHistory)
-class LevelHistoryAdmin(admin.ModelAdmin):
-    list_display = ('nurse', 'from_level', 'to_level', 'change_date', 'status')
-    list_filter = ('from_level', 'to_level', 'status')
-    search_fields = ('nurse__nurse_account_id',)
-
 @admin.register(Management)
 class ManagementAdmin(admin.ModelAdmin):
     list_display = ('management_account_id', 'user', 'department', 'position', 'is_active')
@@ -70,34 +64,12 @@ class CounselingAdmin(admin.ModelAdmin):
     search_fields = ('title', 'management__management_account_id')
     filter_horizontal = ('nurses_id', 'material_files')
 
-@admin.register(CounselingMaterials)
-class CounselingMaterialsAdmin(admin.ModelAdmin):
-    list_display = ('counseling', 'created_at')
-    search_fields = ('counseling__title',)
-    filter_horizontal = ('file',)
 
 @admin.register(CounselingResult)
 class CounselingResultAdmin(admin.ModelAdmin):
     list_display = ('consultation', 'nurse', 'created_at')
     list_filter = ('consultation__status',)
     search_fields = ('consultation__title', 'nurse__nurse_account_id')
-
-@admin.register(MaterialReadStatus)
-class MaterialReadStatusAdmin(admin.ModelAdmin):
-    list_display = ('consultation_materials', 'nurse', 'read_at')
-    list_filter = ('read_at',)
-    search_fields = ('nurse__nurse_account_id',)
-
-@admin.register(LevelUpgradeRequests)
-class LevelUpgradeRequestsAdmin(admin.ModelAdmin):
-    list_display = ('nurse', 'management', 'requested_level', 'current_level', 'status', 'is_approve', 'request_date')
-    list_filter = ('status', 'is_approve')
-    search_fields = ('nurse__nurse_account_id', 'management__management_account_id')
-
-@admin.register(Notificaitons)
-class NotificaitonsAdmin(admin.ModelAdmin):
-    list_display = ('user', 'message', 'created_at')
-    search_fields = ('user__username', 'message')
 
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):

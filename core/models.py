@@ -164,26 +164,6 @@ class LevelUpgradeStatus(models.Model):
     def __str__(self):
         return self.status_name
 
-class LevelHistory(models.Model):
-    """Track level changes for audit purposes"""
-    nurse = models.ForeignKey(Nurse, on_delete=models.CASCADE)
-    from_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='from_level')
-    to_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='to_level')
-    change_date = models.DateField(auto_now_add=True)
-    years_of_service = models.IntegerField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    update_at = models.DateTimeField(auto_now_add=True)
-    status = models.ForeignKey(LevelUpgradeStatus, on_delete=models.SET_NULL, null=True)
-
-
-    
-    class Meta:
-        ordering = ['nurse']
-        db_table = 'level_history'
-        
-    def __str__(self):
-        return f"{self.nurse} from {self.from_level} to {self.to_level} - {self.status}"
-
 class Management(models.Model):
     management_account_id = models.CharField(max_length=50, null=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -296,22 +276,6 @@ class Counseling(models.Model):
         ordering = ['scheduled_date']
         db_table = 'counseling'
 
-
-
-class CounselingMaterials(models.Model):
-    counseling = models.ForeignKey(Counseling, on_delete=models.CASCADE, null=True)
-    description = models.TextField()
-    file = models.ManyToManyField(Materials,related_name="counseling_materials")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
- 
-    def __str__(self):
-        return self.counseling.title   
-    
-    class Meta:
-        db_table = 'counseling_materials'
-        
-
 class CounselingResult(models.Model):
     consultation = models.ForeignKey(Counseling, on_delete=models.CASCADE)
     nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
@@ -322,40 +286,7 @@ class CounselingResult(models.Model):
     
     class Meta:
         db_table = 'counseling_result'
-        
-class MaterialReadStatus(models.Model):
-    consultation_materials = models.ForeignKey(CounselingMaterials, on_delete=models.SET_NULL, null=True)
-    nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
-    read_at = models.DateTimeField()
-    
-    class Meta:
-        db_table = 'material_read_status'
-                
-class LevelUpgradeRequests(models.Model):
-    nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
-    management = models.ForeignKey(Management, on_delete=models.SET_NULL, null=True)
-    requested_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='requested_level_requests')
-    current_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='current_level_requests')
-    request_date = models.DateField(auto_now_add=True)
-    status = models.ForeignKey(LevelUpgradeStatus, on_delete=models.SET_NULL, null=True)
-    is_approve = models.BooleanField(default=False)
-    approval_date = models.DateField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    
-    class Meta:
-        ordering = ['request_date']
-        db_table = 'level_upgrade_requests'
-        
-class Notificaitons(models.Model):
-    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    message = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'notificaitons'
-              
+     
 class AuditLog(models.Model):
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     action_type = models.CharField(max_length=20,null=False)

@@ -11,15 +11,11 @@ from .models import (
     Nurse,
     LevelReference,
     LevelUpgradeStatus,
-    LevelUpgradeRequests,
-    LevelHistory,
     Nurse,
-    MaterialReadStatus,
     Department,
     Counseling,
     CounselingTypes,
     CounselingStatus,
-    CounselingMaterials,
     CounselingResult,
     SystemConfiguration,
     AuditLog,
@@ -318,14 +314,6 @@ class CounselingStatusSerializer(serializers.ModelSerializer):
         model = CounselingStatus
         fields = ['id','name']
      
-class LevelRequestUpdateSerializer(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = LevelUpgradeRequests
-        fields = 'nurse'
-        read_only_fields = ['created_at','updated_at']
 
 class MaterialSerializer(serializers.ModelSerializer):
     class Meta:
@@ -356,7 +344,7 @@ class NurseDetailSerializer(serializers.ModelSerializer):
         fields = ['id','nurse_account_id', 'name', 'level']
 
     def get_name(self, obj):
-        return f"Ns. {obj.user.first_name} {obj.user.last_name}"
+        return f"{obj.user.first_name} {obj.user.last_name}"
                        
 class CounselingSerializer(serializers.ModelSerializer):
     nurses = NurseDetailSerializer(source='nurses_id', many=True, read_only=True)
@@ -420,73 +408,40 @@ class CounselingSerializer(serializers.ModelSerializer):
         return instance
 
 
-        
-class CounselingMaterialSerializer(serializers.ModelSerializer):
-    counseling_title = serializers.CharField( source = 'counseling.title',read_only = True)
-    file = MaterialSerializer(many = True)
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = CounselingMaterials
-        fields = ['id','counseling_title', 'description', 'file','created_at','update_at']
-        read_only_fields = ['created_at','updated_at']
-        
-class CounselingMaterialCreateSerializer(serializers.ModelSerializer):
-    class MaterialCreateSerializer(serializers.ModelSerializer):
-        file_path = serializers.FileField(required = False)
-        class Meta:
-            model = Materials
-            fields = ('file_path',)
-        
-    file = MaterialCreateSerializer(many = True, required = False)
-    
-    def update(self, instance, validated_data):
-        
-        print(validated_data, self)
-        material_data = self.context['request'].FILES.getlist('file')
-        
-        instance.description = validated_data.get('description', instance.description)  
-        instance.save()      
-        # instance = super().update(instance, validated_data)
-                
-        if material_data: 
-            # clear existing item
-            instance.file.clear()
-            
-            print(instance)
-            
-            # Recreate items with updated data
-            for data in material_data:
-                material_instance = Materials.objects.create(file_path=data)
-                instance.file.add(material_instance)
-        return instance
-    
-    class Meta:
-        model = CounselingMaterials
-        fields = (
-            'description',
-            'file'
-        )
-        
 
-class ConsultationResultSerializer(serializers.ModelSerializer):
+class CounselingSimpleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Counseling
+        fields = ['id', 'title', 'scheduled_date', 'status']
+
+class CounselingResultSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
+    updated_at = serializers.DateTimeField(default=timezone.now)
     
+    # Add nested serializers
+    consultation = CounselingSimpleSerializer(read_only=True)
+    nurse = NurseSerializer(read_only=True)
+    
+    # Add write fields for IDs (used when creating/updating)
+    consultation_id = serializers.PrimaryKeyRelatedField(
+        queryset=Counseling.objects.all(), 
+        source='consultation',
+        write_only=True
+    )
+    nurse_id = serializers.PrimaryKeyRelatedField(
+        queryset=Nurse.objects.all(),
+        source='nurse',
+        write_only=True
+    )
+   
     class Meta:
         model = CounselingResult
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
+        fields = [
+            'id', 'consultation', 'nurse', 'nurse_feedback', 
+            'created_at', 'updated_at', 'consultation_id', 'nurse_id'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
         
-class MaterialReadStatusSerializers(serializers.ModelSerializer):
-    created_at = serializers.DateTimeField(default=timezone.now)
-    update_at = serializers.DateTimeField(default=timezone.now)    
-    
-    class Meta:
-        model = MaterialReadStatus
-        fields = '__all__'
-        read_only_fields = ['created_at','updated_at']
         
 class SystemConfigurationSerializers(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
