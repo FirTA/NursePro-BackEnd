@@ -31,7 +31,7 @@ print(SECRET_KEY)
 DEBUG = 'False'
 print(DEBUG)
 # Define specific hosts instead of wildcard '*' for production
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS =  ['.vercel.app','localhost,127.0.0.1']
 
 # Application definition
 
