@@ -31,9 +31,7 @@ print(SECRET_KEY)
 DEBUG = 'False'
 print(DEBUG)
 # Define specific hosts instead of wildcard '*' for production
-ALLOWED_HOSTS =  ['*']
-
-# Application definition
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.vercel.app', '.now.sh']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
