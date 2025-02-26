@@ -41,7 +41,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django_filters',
-    # jwt
     'rest_framework_simplejwt.token_blacklist',
     
     # third party
@@ -49,12 +48,6 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_celery_beat',
         
-    # local apps
-    # 'Apps.accounts',
-    # 'Apps.consultations',
-    # 'Apps.levels',
-    # 'Apps.materials',
-    # 'test3',
     'core.apps.CoreConfig',
         
 ]
