@@ -47,7 +47,8 @@ INSTALLED_APPS = [
     # third party
     'rest_framework',
     'corsheaders',
-    
+    'django_celery_beat',
+        
     # local apps
     # 'Apps.accounts',
     # 'Apps.consultations',
@@ -188,6 +189,14 @@ LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'Asia/Jakarta'
 USE_TZ = True
 USE_I18N = True
+
+# Celery settings
+CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Use Redis as broker
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'Asia/Jakarta'  # Set to your timezone
 
 
 # Static files (CSS, JavaScript, Images)

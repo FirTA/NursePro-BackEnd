@@ -40,7 +40,7 @@ from .serializers import (
     AuditLogSerializers,
     ManagementSerializers,
     SystemConfigurationSerializers,
-    UserProfileSerializer,
+    UserProfileSerializer,RoleSerializer,AdminUserSerializer,NurseSimpleSerializer
 )
 from .models import (
     User,
@@ -55,7 +55,9 @@ from .models import (
     CounselingResult,
     SystemConfiguration,
     AuditLog,
-    Materials
+    Materials,
+    LoginHistory,
+    Roles
 )
 from rest_framework.decorators import api_view, permission_classes
 from django.utils.decorators import method_decorator
@@ -72,6 +74,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from dateutil.relativedelta import relativedelta
 import calendar
 from datetime import datetime, timedelta
+from django.contrib.auth.hashers import make_password
 
 
 @api_view(['GET'])
@@ -293,19 +296,20 @@ def nurse_dashboard(request):
     # Calculate level progress and next level date
     level_progress = 0
     next_level_date = None
-    
+
     if nurse.level_upgrade_date and nurse.current_level:
-        hire_date = nurse.hire_date
         current_date = today.date()
         next_level_date = nurse.level_upgrade_date
         
-        # Calculate progress as percentage of time elapsed since hire
-        if hire_date and next_level_date:
-            total_days = (next_level_date - hire_date).days
-            elapsed_days = (current_date - hire_date).days
-            
-            if total_days > 0:
-                level_progress = min(100, round((elapsed_days / total_days) * 100))
+        # Use the specific start date for this level
+        level_start_date = nurse.current_level_start_date or nurse.hire_date
+        
+        # Calculate progress based on elapsed time
+        total_days = (next_level_date - level_start_date).days
+        elapsed_days = (current_date - level_start_date).days
+        
+        if total_days > 0:
+            level_progress = min(100, round((elapsed_days / total_days) * 100))
     
     # Build response data
     response_data = {
@@ -431,25 +435,371 @@ def update_profile_picture(request):
     serializer = UserProfileSerializer(user)
     return Response(serializer.data)
 
+
+class AdminUserViewSet(viewsets.ModelViewSet):
+    """ViewSet for admin to manage users"""
+    serializer_class = AdminUserSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        # Check if user has admin role
+        if not hasattr(user, 'role') or user.role.name.lower() != 'admin':
+            return User.objects.none()
+        
+        # Get all users
+        queryset = User.objects.all().select_related('role')
+        
+        # Filter by search query if provided
+        search = self.request.query_params.get('search', None)
+        if search:
+            queryset = queryset.filter(
+                Q(username__icontains=search) |
+                Q(email__icontains=search) |
+                Q(first_name__icontains=search) |
+                Q(last_name__icontains=search)
+            )
+        
+        # Filter by role if provided
+        role = self.request.query_params.get('role', None)
+        if role:
+            queryset = queryset.filter(role__name=role)
+            
+        return queryset
+    
+    def create(self, request, *args, **kwargs):
+        # Check if user is admin
+        if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
+            return Response(
+                {"error": "Only admin users can create users"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        data = request.data.copy()
+        
+        # Hash password if provided
+        if 'password' in data and data['password']:
+            data['password'] = make_password(data['password'])
+        else:
+            data.pop('password', None)
+        
+        # Set role
+        if 'role' in data:
+            try:
+                role = Roles.objects.get(id=data['role'])
+            except Roles.DoesNotExist:
+                return Response(
+                    {"error": "Invalid role provided"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Create basic user first
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        
+        # Create nurse or management profile based on user type
+        if data.get('userType') == 'nurse':
+            nurse_data = {
+                'user': user.id,
+                'nurse_account_id': data.get('nurse_account_id'),
+                'current_level': data.get('level', None),
+                'hire_date': data.get('hire_date'),
+                'years_of_service': 0,  # Will be calculated on save
+                'department': data.get('department'),
+                'specialization': data.get('specialization', ''),
+                'is_active': True
+            }
+            nurse_serializer = NurseSimpleSerializer(data=nurse_data)
+            if nurse_serializer.is_valid():
+                nurse_serializer.save()
+            else:
+                # Rollback user creation if nurse profile creation fails
+                user.delete()
+                return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        elif data.get('userType') == 'management':
+            management_data = {
+                'user': user.id,
+                'management_account_id': data.get('management_account_id'),
+                'department': data.get('department'),
+                'position': data.get('position', ''),
+                'is_active': True
+            }
+            management_serializer = ManagementSerializers(data=management_data)
+            if management_serializer.is_valid():
+                management_serializer.save()
+            else:
+                # Rollback user creation if management profile creation fails
+                user.delete()
+                return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Return created user
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    def update(self, request, *args, **kwargs):
+        # Check if user is admin
+        if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
+            return Response(
+                {"error": "Only admin users can update users"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        user = self.get_object()
+        data = request.data.copy()
+        
+        # Hash password if provided
+        if 'password' in data and data['password']:
+            data['password'] = make_password(data['password'])
+        else:
+            data.pop('password', None)
+        
+        # Update basic user info
+        serializer = self.get_serializer(user, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        updated_user = serializer.save()
+        
+        # Update nurse or management profile based on user type
+        if data.get('userType') == 'nurse':
+            # Check if nurse profile exists
+            try:
+                nurse = Nurse.objects.get(user=user)
+                nurse_data = {
+                    'nurse_account_id': data.get('nurse_account_id', nurse.nurse_account_id),
+                    'current_level': data.get('level', nurse.current_level_id),
+                    'hire_date': data.get('hire_date', nurse.hire_date),
+                    'department': data.get('department', nurse.department_id),
+                    'specialization': data.get('specialization', nurse.specialization),
+                }
+                nurse_serializer = NurseSimpleSerializer(nurse, data=nurse_data, partial=True)
+                if nurse_serializer.is_valid():
+                    nurse_serializer.save()
+                else:
+                    return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            except Nurse.DoesNotExist:
+                # Create nurse profile if it doesn't exist
+                nurse_data = {
+                    'user': user.id,
+                    'nurse_account_id': data.get('nurse_account_id'),
+                    'current_level': data.get('level', None),
+                    'hire_date': data.get('hire_date'),
+                    'years_of_service': 0,  # Will be calculated on save
+                    'department': data.get('department'),
+                    'specialization': data.get('specialization', ''),
+                    'is_active': True
+                }
+                nurse_serializer = NurseSimpleSerializer(data=nurse_data)
+                if nurse_serializer.is_valid():
+                    nurse_serializer.save()
+                else:
+                    return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Delete management profile if it exists
+                try:
+                    management = Management.objects.get(user=user)
+                    management.delete()
+                except Management.DoesNotExist:
+                    pass
+                
+        elif data.get('userType') == 'management':
+            # Check if management profile exists
+            try:
+                management = Management.objects.get(user=user)
+                management_data = {
+                    'management_account_id': data.get('management_account_id', management.management_account_id),
+                    'department': data.get('department', management.department_id),
+                    'position': data.get('position', management.position),
+                }
+                management_serializer = ManagementSerializers(management, data=management_data, partial=True)
+                if management_serializer.is_valid():
+                    management_serializer.save()
+                else:
+                    return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            except Management.DoesNotExist:
+                # Create management profile if it doesn't exist
+                management_data = {
+                    'user': user.id,
+                    'management_account_id': data.get('management_account_id'),
+                    'department': data.get('department'),
+                    'position': data.get('position', ''),
+                    'is_active': True
+                }
+                management_serializer = ManagementSerializers(data=management_data)
+                if management_serializer.is_valid():
+                    management_serializer.save()
+                else:
+                    return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                
+                # Delete nurse profile if it exists
+                try:
+                    nurse = Nurse.objects.get(user=user)
+                    nurse.delete()
+                except Nurse.DoesNotExist:
+                    pass
+        
+        # Return updated user
+        return Response(serializer.data)
+    
+    def destroy(self, request, *args, **kwargs):
+        # Check if user is admin
+        if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
+            return Response(
+                {"error": "Only admin users can delete users"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Cannot delete yourself
+        if request.user.id == kwargs.get('pk'):
+            return Response(
+                {"error": "You cannot delete your own account"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        return super().destroy(request, *args, **kwargs)
+
+class LoginHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for admin to view login history"""
+    serializer_class = None  # You'll need to create a serializer for this
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        user = self.request.user
+        # Check if user has admin role
+        if not hasattr(user, 'role') or user.role.name.lower() != 'admin':
+            return LoginHistory.objects.none()
+        
+        # Get all login history
+        queryset = LoginHistory.objects.all().select_related('user')
+        
+        # Filter by user if provided
+        user_id = self.request.query_params.get('user_id', None)
+        if user_id:
+            queryset = queryset.filter(user_id=user_id)
+            
+        # Filter by status if provided
+        status = self.request.query_params.get('status', None)
+        if status:
+            queryset = queryset.filter(status=status)
+            
+        # Filter by date range if provided
+        start_date = self.request.query_params.get('start_date', None)
+        if start_date:
+            queryset = queryset.filter(login_time__gte=start_date)
+            
+        end_date = self.request.query_params.get('end_date', None)
+        if end_date:
+            queryset = queryset.filter(login_time__lte=end_date)
+            
+        return queryset.order_by('-login_time')
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_dashboard(request):
+    """Dashboard data for admin users"""
+    # Check if user is admin
+    if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
+        return Response(
+            {"error": "Only admin users can access this endpoint"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Get counts for dashboard
+    user_count = User.objects.count()
+    nurse_count = Nurse.objects.count()
+    management_count = Management.objects.count()
+    department_count = Department.objects.count()
+    
+    # Get recent login activity
+    recent_logins = LoginHistory.objects.all().order_by('-login_time')[:5]
+    
+    # Get active sessions (no logout time)
+    active_sessions = LoginHistory.objects.filter(logout_time__isnull=True).count()
+    
+    # Get users by role
+    users_by_role = []
+    for role in Roles.objects.all():
+        count = User.objects.filter(role=role).count()
+        users_by_role.append({
+            'role': role.name,
+            'count': count
+        })
+    
+    # Build response data
+    response_data = {
+        'counts': {
+            'users': user_count,
+            'nurses': nurse_count,
+            'management': management_count,
+            'departments': department_count,
+            'active_sessions': active_sessions
+        },
+        'recent_logins': [],
+        'users_by_role': users_by_role
+    }
+    
+    # Process recent logins
+    for login in recent_logins:
+        response_data['recent_logins'].append({
+            'id': login.id,
+            'user': {
+                'id': login.user.id,
+                'username': login.user.username,
+                'name': f"{login.user.first_name} {login.user.last_name}"
+            },
+            'login_time': login.login_time,
+            'logout_time': login.logout_time,
+            'ip_address': login.ip_address,
+            'device_info': login.device_info,
+            'status': login.status
+        })
+    
+    return Response(response_data)
+
 class CustomTokenRefresh(TokenRefreshView):
-  def post(self, request, *args, **kwargs):
+    def post(self, request, *args, **kwargs):
         try:
             # Call the original TokenRefreshView logic
             print(request)
             response = super().post(request, *args, **kwargs)
-
             # If successful, return the response as usual
             if response.status_code == 200:
                 return response
         except Exception as e:
-            refresh = request.data.get("refresh")
-            print(e)
-            print(refresh)
-            token = RefreshToken(refresh)
-            user_id = token.payload.get('user_id')
-            user = User.objects.get(id = user_id)
-            user.is_login = False
-            user.save()
+            try:
+                refresh = request.data.get("refresh")
+                print(e)
+                print(refresh)
+                
+                # Check if refresh token exists
+                if not refresh:
+                    return Response(
+                        {"error": "Refresh token not provided."},
+                        status=status.HTTP_401_UNAUTHORIZED,
+                    )
+                
+                # Try to decode the token
+                try:
+                    token = RefreshToken(refresh)
+                    user_id = token.payload.get('user_id')
+                    
+                    # Check if user exists before trying to update them
+                    try:
+                        user = User.objects.get(id=user_id)
+                        user.is_login = False
+                        user.save()
+                    except User.DoesNotExist:
+                        # User doesn't exist but we still want to return the same error
+                        print(f"User with ID {user_id} does not exist")
+                        
+                except (TokenError, InvalidToken):
+                    # Handle invalid token format
+                    print("Invalid token format")
+                    
+            except Exception as inner_exception:
+                # Catch any other exceptions in our exception handler
+                print(f"Error in exception handler: {inner_exception}")
+                
+            # Always return the same error message for security reasons
             return Response(
                 {"error": "Refresh token expired. Please log in again."},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -613,6 +963,7 @@ class NurseViewSet(viewsets.ModelViewSet):
             return queryset.all()
         
         return queryset.filter(user=self.request.user)
+    
 
     @action(detail=True, methods=['post'])
     def toggle_active(self, request, pk=None):
@@ -844,7 +1195,12 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
             })
         
         return Response(result)
-                            
+
+class RolesViewSet(viewsets.ModelViewSet):
+    queryset = Roles.objects.all()
+    serializer_class = RoleSerializer
+    permission_classes = [IsAuthenticated]   
+                  
 class AuditLogViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     queryset = AuditLog.objects.all()
@@ -860,37 +1216,6 @@ class ManagementViewSet(viewsets.ModelViewSet):
     queryset = Management.objects.all()
     serializer_class = ManagementSerializers
             
-         
-         
-         
-class TestAuthView(GenericAPIView):
-    permission_classes = [IsAuthenticated]
-    # authentication_classes = [JWTAuthentication]  
-    
-    def get(self, request):
-        # token = "your_access_token"
-        
-        print(request.user.role.role_name)
-        if request.user.role.role_name != 'Nurse':
-            return Response({'error' : 'Only nurses can view their current level'},status=status.HTTP_403_FORBIDDEN)
-
-        # print(request.data)
-        decoded_token = AccessToken(request.data['access_token'])
-        user_id = decoded_token.payload['user_id']
-        # print(decoded_token.payload)
-        nurse_id = Nurse.objects.get(user_id = user_id)
-        print(f"user_id : {nurse_id} ")
-        consultation_list = Counseling.objects.filter(nurses_id = nurse_id)
-        
-        for consultation_item in consultation_list:
-            print(f"{consultation_item} - {consultation_item.management}")
-        data = {
-            'msg' : 'its workds',
-            # 'tokem' : decoded_token
-        }
-        # print(decoded_token)  # Example of getting user ID from the token
-        
-        return Response(status=status.HTTP_200_OK)
 
 class LevelReferenceViewSet(viewsets.ModelViewSet):
     queryset = LevelReference.objects.all()

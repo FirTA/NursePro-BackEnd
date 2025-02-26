@@ -19,7 +19,7 @@ from .models import (
     CounselingResult,
     SystemConfiguration,
     AuditLog,
-    Materials    
+    Materials,LoginHistory    
 )
 
 
@@ -164,6 +164,105 @@ class ResetPasswordConfirmSerializer(serializers.Serializer):
         if attrs['new_password'] != attrs['new_password2']:
             raise serializers.ValidationError({"new_password": "Password fields didn't match."})
         return attrs
+class LoginHistoryUserSerializer(serializers.ModelSerializer):
+    """Serializer for simplified User data in LoginHistory"""
+    full_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'full_name', 'role']
+    
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}"
+
+class LoginHistorySerializer(serializers.ModelSerializer):
+    """Serializer for LoginHistory model"""
+    user = LoginHistoryUserSerializer(read_only=True)
+    session_duration = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = LoginHistory
+        fields = [
+            'id', 'user', 'login_time', 'logout_time', 
+            'ip_address', 'device_info', 'status',
+            'session_duration'
+        ]
+    
+    def get_session_duration(self, obj):
+        """Calculate session duration in seconds"""
+        if obj.login_time and obj.logout_time:
+            duration = (obj.logout_time - obj.login_time).total_seconds()
+            hours = int(duration // 3600)
+            minutes = int((duration % 3600) // 60)
+            seconds = int(duration % 60)
+            return f"{hours}h {minutes}m {seconds}s"
+        return None
+    
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Serializer for admin to manage users"""
+    role_name = serializers.SerializerMethodField()
+    department = serializers.SerializerMethodField()
+    user_type = serializers.SerializerMethodField()
+    nurse_details = serializers.SerializerMethodField()
+    management_details = serializers.SerializerMethodField()
+    password = serializers.CharField(write_only=True, required=False)
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name', 
+            'role', 'role_name', 'is_active', 'phone', 'user_type', 
+            'department', 'nurse_details', 'management_details','password','is_login' 
+        ]
+        read_only_fields = ['role_name', 'user_type', 'department', 'nurse_details', 'management_details']
+    
+    def get_role_name(self, obj):
+        return obj.role.name if obj.role else None
+    
+    def get_user_type(self, obj):
+        if hasattr(obj, 'nurse') and obj.nurse:
+            return 'nurse'
+        elif hasattr(obj, 'management') and obj.management:
+            return 'management'
+        return None
+    
+    def get_department(self, obj):
+        department = None
+        if hasattr(obj, 'nurse') and obj.nurse and obj.nurse.department:
+            department = obj.nurse.department
+        elif hasattr(obj, 'management') and obj.management and obj.management.department:
+            department = obj.management.department
+        
+        if department:
+            return {
+                'id': department.id,
+                'name': department.name
+            }
+        return None
+    
+    def get_nurse_details(self, obj):
+        if hasattr(obj, 'nurse') and obj.nurse:
+            return {
+                'id': obj.nurse.id,
+                'nurse_account_id': obj.nurse.nurse_account_id,
+                'current_level': obj.nurse.current_level.level if obj.nurse.current_level else None,
+                'hire_date': obj.nurse.hire_date,
+                'years_of_service': obj.nurse.years_of_service,
+                'specialization': obj.nurse.specialization,
+                'is_active': obj.nurse.is_active
+            }
+        return None
+    
+    def get_management_details(self, obj):
+        if hasattr(obj, 'management') and obj.management:
+            return {
+                'id': obj.management.id,
+                'management_account_id': obj.management.management_account_id,
+                'position': obj.management.position,
+                'is_active': obj.management.is_active
+            }
+        return None
+
         
 class DepartmentSerializer(serializers.ModelSerializer):
     class Meta:
@@ -187,6 +286,26 @@ class NurseSerializer(serializers.ModelSerializer):
 
     def get_name(self, obj):
         return f"Ns. {obj.user.first_name} {obj.user.last_name}"
+
+    def update(self, instance, validated_data):
+        # Handle the nested department data if it exists
+        department_data = validated_data.pop('department', None)
+        
+        # Update the nurse instance with the remaining validated data
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+            
+        # If department data was provided, update the department
+        if department_data and 'id' in department_data:
+            # Just associate with an existing department by ID
+            try:
+                department = Department.objects.get(id=department_data['id'])
+                instance.department = department
+            except Department.DoesNotExist:
+                pass
+        
+        instance.save()
+        return instance
 
 class ManagementSerializer(serializers.ModelSerializer):
     department = DepartmentSerializer()
@@ -469,3 +588,15 @@ class ManagementSerializers(serializers.ModelSerializer):
         model = Management
         fields = '__all__'
         read_only_fields = ['created_at','updated_at']
+        
+class NurseSimpleSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    level = serializers.CharField(source='current_level.level', read_only=True)
+
+    class Meta:
+        model = Nurse
+        fields = '__all__'
+        read_only_fields = ['created_at','updated_at']
+        
+    def get_name(self, obj):
+        return f"Ns. {obj.user.first_name} {obj.user.last_name}"

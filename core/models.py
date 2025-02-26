@@ -88,11 +88,13 @@ class Nurse(models.Model):
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     update_at = models.DateTimeField(auto_now_add=True)
+    current_level_start_date = models.DateField(null=True)
 
     def __str__(self):
         return self.nurse_account_id + " - " + self.user.first_name + " " + self.user.last_name
 
     def calculate_years_of_service(self):
+        """Calculate years of service based on hire date."""
         if self.hire_date:
             today = timezone.now().date()
             difference = relativedelta(today, self.hire_date)
@@ -101,10 +103,101 @@ class Nurse(models.Model):
         return 0
     
     def should_upgrade_level(self):
-        """Check if nurse should be upgraded based on level_upgrade_date"""
-        if self.level_upgrade_date and self.current_level:
-            return timezone.now().date() >= self.level_upgrade_date
-        return False
+        """Check if nurse should be upgraded based on time in current level."""
+        if not (self.current_level and self.current_level_start_date):
+            return False
+            
+        today = timezone.now().date()
+        
+        # If level_upgrade_date is set, use it as the target date
+        if self.level_upgrade_date:
+            return today >= self.level_upgrade_date
+            
+        # Otherwise calculate based on required time in current level
+        time_in_level = relativedelta(today, self.current_level_start_date)
+        months_in_level = (time_in_level.years * 12) + time_in_level.months
+        
+        return months_in_level >= self.current_level.required_time_in_month
+    
+    def get_eligible_level(self):
+        """Determine the appropriate level based on years of service and current level."""
+        years_of_service = self.calculate_years_of_service()
+        
+        # If nurse already has a level, get the next one if available
+        if self.current_level:
+            next_level = LevelReference.objects.filter(
+                level=self.current_level.next_level
+            ).first()
+            
+            if next_level:
+                return next_level
+        
+        # If no current level or no next level defined, find appropriate level from scratch
+        # This is useful for initial level assignment or corrections
+        all_levels = LevelReference.objects.order_by('id')
+        appropriate_level = None
+        
+        total_months = 0
+        for level in all_levels:
+            total_months += level.required_time_in_month
+            if years_of_service < total_months:
+                # If we haven't reached this level yet based on service time
+                break
+            appropriate_level = level
+            
+        return appropriate_level
+    
+    def update_level(self, manual=False, notes=None):
+        """
+        Update nurse's level if eligible.
+        
+        Args:
+            manual: Whether this is a manual update (vs automatic)
+            notes: Optional notes about the level change
+            
+        Returns:
+            bool: True if level was updated, False if no update was needed/possible
+        """
+        # Get eligible level
+        next_level = self.get_eligible_level()
+        
+        # If no eligible level or same as current, no update needed
+        if not next_level or (self.current_level and next_level.id == self.current_level.id):
+            return False
+            
+        # Determine status
+        if manual:
+            status = LevelUpgradeStatus.objects.get(status_name='Manual')
+        else:
+            status = LevelUpgradeStatus.objects.get(status_name='Automatic')
+        
+        # Create history record
+        history = LevelHistory.objects.create(
+            nurse=self,
+            from_level=self.current_level,
+            to_level=next_level,
+            years_of_service=self.calculate_years_of_service(),
+            status=status,
+            notes=notes
+        )
+            
+        # Update nurse record
+        old_level = self.current_level
+        self.current_level = next_level
+        self.current_level_start_date = timezone.now().date()
+        
+        # Calculate new upgrade date
+        self.level_upgrade_date = self.current_level_start_date + relativedelta(
+            months=next_level.required_time_in_month
+        )
+        self.save(update_fields=[
+            'current_level', 
+            'current_level_start_date', 
+            'level_upgrade_date',
+            'update_at'
+        ])
+        
+        return True
     
     def get_next_level(self):
         """Get the next level from LevelReference"""
@@ -114,6 +207,8 @@ class Nurse(models.Model):
             ).first()
             return next_level
         return None
+    
+    
     
     def update_level_and_date(self):
         """Update current level and calculate new upgrade date"""
@@ -125,29 +220,30 @@ class Nurse(models.Model):
                 from_level=self.current_level,
                 to_level=next_level,
                 years_of_service=self.years_of_service,
-                status=LevelUpgradeStatus.objects.get(status_name='Automatic')  # You'll need this status in your DB
+                status=LevelUpgradeStatus.objects.get(status_name='Automatic')
             )
             
             # Update to new level
             self.current_level = next_level
             
+            # Set current level start date to today
+            self.current_level_start_date = timezone.now().date()
+            
             # Calculate new upgrade date
             self.level_upgrade_date = timezone.now().date() + relativedelta(months=next_level.required_time_in_month)
-
+    
     def save(self, *args, **kwargs):
-        
-        if not self.pk:  # New nurse
-            super().save(*args, **kwargs)
-        else:  # Existing nurse
-            if self.should_upgrade_level():
-                self.update_level_and_date()
-        
+        # Calculate years of service
         self.years_of_service = self.calculate_years_of_service()
-        if self.hire_date and self.current_level:
-            required_months = self.current_level.required_time_in_month
-            self.level_upgrade_date = self.hire_date + relativedelta(months=required_months)
-            
+        
+        is_new = not self.pk
         super().save(*args, **kwargs)
+        
+        # For new nurses, set initial level_upgrade_date if needed
+        if is_new and self.current_level and self.current_level_start_date:
+            required_months = self.current_level.required_time_in_month
+            self.level_upgrade_date = self.current_level_start_date + relativedelta(months=required_months)
+            super().save(update_fields=['level_upgrade_date'])
 
     class Meta:
         ordering = ['nurse_account_id']
@@ -163,6 +259,26 @@ class LevelUpgradeStatus(models.Model):
         
     def __str__(self):
         return self.status_name
+
+class LevelHistory(models.Model):
+    """Track level changes for audit purposes"""
+    nurse = models.ForeignKey(Nurse, on_delete=models.CASCADE)
+    from_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='from_level')
+    to_level = models.ForeignKey(LevelReference, on_delete=models.SET_NULL, null=True, related_name='to_level')
+    change_date = models.DateField(auto_now_add=True)
+    years_of_service = models.IntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    update_at = models.DateTimeField(auto_now_add=True)
+    status = models.ForeignKey(LevelUpgradeStatus, on_delete=models.SET_NULL, null=True)
+    notes = models.TextField(blank=True, null=True)
+
+    
+    class Meta:
+        ordering = ['nurse']
+        db_table = 'level_history'
+        
+    def __str__(self):
+        return f"{self.nurse} from {self.from_level} to {self.to_level} - {self.status}"
 
 class Management(models.Model):
     management_account_id = models.CharField(max_length=50, null=False)
@@ -286,7 +402,8 @@ class CounselingResult(models.Model):
     
     class Meta:
         db_table = 'counseling_result'
-     
+        
+              
 class AuditLog(models.Model):
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
     action_type = models.CharField(max_length=20,null=False)
