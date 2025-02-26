@@ -48,8 +48,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'django_celery_beat',
-    'cloudinary_storage',
-    'cloudinary',
         
     # local apps
     'core.apps.CoreConfig',
