@@ -48,6 +48,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'django_celery_beat',
+    'cloudinary_storage',
+    'cloudinary',
         
     # local apps
     'core.apps.CoreConfig',
@@ -189,9 +191,19 @@ CELERY_TIMEZONE = 'Asia/Jakarta'
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
-STATIC_URL = 'static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
+# Supabase configuration
+SUPABASE_URL = os.environ.get('https://ilgcqsimufbmfbyrfgta.supabase.co/storage/v1/s3', '')
+SUPABASE_KEY = os.environ.get('4e95e7cedef43c870daf91802cd334bf37cec1bcbccf726a1aa070bbe0055e4f', '')
+SUPABASE_BUCKET_NAME = os.environ.get('media', 'media')
+
+# Use WhiteNoise for static files
+STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# Use Supabase for media files
+MEDIA_URL = '/media/'
+DEFAULT_FILE_STORAGE = 'Backend.storage_backends.SupabaseStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
