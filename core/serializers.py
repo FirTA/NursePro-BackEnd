@@ -391,15 +391,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             'initial_level': '1-A',
             'years_of_service': 0
         }
-        
-""""
-list parameter :
-- Level
-- Level Upgrade Status
-- Department
-- Consultation Type
-- Consultation Status
-"""        
+            
 class LevelReferenceSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(default=timezone.now)
     update_at = serializers.DateTimeField(default=timezone.now)
@@ -538,13 +530,13 @@ class CounselingResultSerializer(serializers.ModelSerializer):
     updated_at = serializers.DateTimeField(default=timezone.now)
     
     # Add nested serializers
-    consultation = CounselingSimpleSerializer(read_only=True)
+    counseling = CounselingSimpleSerializer(read_only=True)
     nurse = NurseSerializer(read_only=True)
     
     # Add write fields for IDs (used when creating/updating)
-    consultation_id = serializers.PrimaryKeyRelatedField(
+    counseling_id = serializers.PrimaryKeyRelatedField(
         queryset=Counseling.objects.all(), 
-        source='consultation',
+        source='counseling',
         write_only=True
     )
     nurse_id = serializers.PrimaryKeyRelatedField(
@@ -556,8 +548,8 @@ class CounselingResultSerializer(serializers.ModelSerializer):
     class Meta:
         model = CounselingResult
         fields = [
-            'id', 'consultation', 'nurse', 'nurse_feedback', 
-            'created_at', 'updated_at', 'consultation_id', 'nurse_id'
+            'id', 'counseling', 'nurse', 'nurse_feedback', 
+            'created_at', 'updated_at', 'counseling_id', 'nurse_id'
         ]
         read_only_fields = ['created_at', 'updated_at']
         

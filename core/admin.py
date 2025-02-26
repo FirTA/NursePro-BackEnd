@@ -67,16 +67,16 @@ class CounselingAdmin(admin.ModelAdmin):
 
 @admin.register(CounselingResult)
 class CounselingResultAdmin(admin.ModelAdmin):
-    list_display = ('consultation', 'nurse', 'created_at')
-    list_filter = ('consultation__status',)
-    search_fields = ('consultation__title', 'nurse__nurse_account_id')
+    list_display = ('counseling', 'nurse', 'created_at')
+    list_filter = ('counseling__status',)
+    search_fields = ('counseling__title', 'nurse__nurse_account_id')
 
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):
-    list_display = ('user', 'action_type', 'table_name', 'record_id', 'ip_address', 'timestamp')
-    list_filter = ('action_type', 'table_name')
-    search_fields = ('user__username', 'table_name')
-
+    list_display = ('user', 'action_type', 'content_type', 'object_id', 'content_object', 'description','data','ip_address','timestamp')
+    list_filter = ('action_type', 'content_type')
+    search_fields = ('user__username', 'content_type')
+    
 @admin.register(LoginHistory)
 class LoginHistoryAdmin(admin.ModelAdmin):
     list_display = ('user', 'login_time', 'logout_time', 'ip_address', 'device_info', 'status')

@@ -18,7 +18,9 @@ from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, permissions, filters, status
 from django.db.models import Q
 from django.db.models import Count, Prefetch
-
+from .mixins import DatabaseRetryMixin
+from django.db.models.functions import Concat
+from django.db.models import Value, CharField
 
 from .serializers import (
     UserSerializer,
@@ -75,10 +77,37 @@ from dateutil.relativedelta import relativedelta
 import calendar
 from datetime import datetime, timedelta
 from django.contrib.auth.hashers import make_password
+from django.views.decorators.cache import cache_page
+from django.core.cache import cache
+
+def invalidate_dashboard_caches():
+    """
+    Invalidate all dashboard-related caches in a way compatible with all cache backends
+    """
+    # Clear specific cache keys that we know are used
+    cache_prefixes = ['management_dashboard_', 'nurse_dashboard_', 'admin_dashboard_']
+    
+    # If we have user IDs, we can be more specific
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    
+    # Try to get a limited set of user IDs to avoid excessive DB queries
+    user_ids = list(User.objects.values_list('id', flat=True)[:100])
+    
+    # Invalidate each specific cache key
+    for prefix in cache_prefixes:
+        # Clear the generic keys first
+        cache.delete(f"{prefix}all")
+        
+        # Then clear user-specific keys
+        for user_id in user_ids:
+            cache.delete(f"{prefix}{user_id}")
+
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+@cache_page(60 * 5)
 def management_dashboard(request):
     """
     Dashboard data for management users
@@ -91,18 +120,27 @@ def management_dashboard(request):
             status=status.HTTP_403_FORBIDDEN
         )
     
-    # Get all counseling sessions
-    all_counseling = Counseling.objects.all()
     
-    # Get completed sessions (status 3 is assumed to be "Completed")
-    completed_status = CounselingStatus.objects.get(id=3)
+    cache_key = f"management_dashboard_{request.user.id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return Response(cached_data)
+    
+    # Get all counseling sessions
+    all_counseling = Counseling.objects.select_related(
+        'status', 'counseling_type'
+        ).prefetch_related('nurses_id__user')
+        
+    COMPLETED_STATUS_ID = 3
+    completed_status = CounselingStatus.objects.get(id=COMPLETED_STATUS_ID)
+        
     completed_counseling = all_counseling.filter(status=completed_status)
     
     # Get scheduled sessions (future sessions)
     today = timezone.now()
     scheduled_counseling = all_counseling.filter(
         scheduled_date__gt=today,
-        status__id__in=[1, 2]  # Assuming 1=Scheduled, 2=In Progress
+        status__id__in=[1, 2] 
     )
     
     # Get recent completed sessions
@@ -111,63 +149,75 @@ def management_dashboard(request):
     # Get upcoming sessions
     upcoming_sessions = scheduled_counseling.order_by('scheduled_date')[:5]
     
-    # Get total nurse count
-    nurse_count = Nurse.objects.filter(is_active=True).count()
+    nurse_stats = Nurse.objects.filter(is_active = True).aggregate(
+        total_count=Count('id'),
+        level_stats=Count('current_level',distinct=True)
+    )
+    
+    nurse_count = nurse_stats['total_count']
     
     # Get nurse count by level
     nurse_by_level = Nurse.objects.filter(is_active=True).values(
         'current_level__level'
-    ).annotate(count=Count('id'))
+    ).annotate(count=Count('id')).order_by('current_level__level')
     
-    # Get pending notes count (completed sessions without notes from all nurses)
-    sessions_with_notes = CounselingResult.objects.values('consultation').distinct()
-    completed_without_notes = completed_counseling.exclude(
-        id__in=[item['consultation'] for item in sessions_with_notes]
-    ).count()
+    completed_ids = list(completed_counseling.values_list('id',flat=True))
     
-    # Get completed sessions with partial notes
-    sessions_with_partial_notes = []
-    for session in completed_counseling:
-        nurses_count = session.nurses_id.count()
-        notes_count = CounselingResult.objects.filter(consultation=session).count()
-        if 0 < notes_count < nurses_count:
-            sessions_with_partial_notes.append(session.id)
+    sessions_with_notes_count = CounselingResult.objects.filter(
+        counseling__in = completed_ids
+        ).values('counseling').annotate(
+            notes_count=Count('id'),
+            nurse_count=Count('counseling__nurses_id',distinct=True)
+        )
     
-    pending_notes_count = completed_without_notes + len(sessions_with_partial_notes)
+    pending_notes_count = 0
+    for session in sessions_with_notes_count:
+        if session['notes_count'] == 0:
+            pending_notes_count += 1
+        elif session['notes_count'] < session['nurse_count']:
+            pending_notes_count += 1
     
-    # Get counseling sessions by month (last 6 months)
+    six_months_ago = today - relativedelta(months=5)
+    six_months_ago = six_months_ago.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # Get all counseling in the past 6 months with a single query
+    counseling_by_month = all_counseling.filter(
+        scheduled_date__gte=six_months_ago
+    ).extra({
+        'month': "to_char(scheduled_date, 'Mon YYYY')"
+    }).values('month', 'status__id').annotate(count=Count('id')).order_by('month')
+    
+    # Process the result for the response
     months_data = []
-    for i in range(5, -1, -1):
-        month_start = (today - relativedelta(months=i)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_end = (month_start + relativedelta(months=1)) - timedelta(seconds=1)
-        
-        month_name = calendar.month_name[month_start.month][:3] + " " + str(month_start.year)
-        
-        completed_count = completed_counseling.filter(
-            scheduled_date__gte=month_start,
-            scheduled_date__lte=month_end
-        ).count()
-        
-        scheduled_count = scheduled_counseling.filter(
-            scheduled_date__gte=month_start,
-            scheduled_date__lte=month_end
-        ).count()
-        
-        months_data.append({
-            'month': month_name,
-            'completed': completed_count,
-            'scheduled': scheduled_count
-        })
+    month_data_map = {}
     
-    # Get counseling by type
-    counseling_by_type = []
-    for ctype in CounselingTypes.objects.all():
-        count = all_counseling.filter(counseling_type=ctype).count()
-        if count > 0:
-            counseling_by_type.append({
-                'name': ctype.name,
-                'value': count
-            })
+    for i in range(5, -1, -1):
+        month_date = (today - relativedelta(months=i)).replace(day=1)
+        month_name = calendar.month_name[month_date.month][:3] + " " + str(month_date.year)
+        month_data_map[month_name] = {'month': month_name, 'completed': 0, 'scheduled': 0}
+        months_data.append(month_data_map[month_name])
+    
+    for item in counseling_by_month:
+        month = item['month']
+        if month in month_data_map:
+            if item['status__id'] == COMPLETED_STATUS_ID:
+                month_data_map[month]['completed'] = item['count']
+            elif item['status__id'] in [1, 2]:  # Scheduled or In Progress
+                month_data_map[month]['scheduled'] = item['count']
+    
+    # Get counseling by type in a single query
+    counseling_by_type_data = all_counseling.values(
+        'counseling_type__name'
+    ).annotate(
+        value=Count('id')
+    ).filter(value__gt=0).order_by('-value')
+    
+    counseling_by_type = [
+        {
+            'name': item['counseling_type__name'] or 'Unspecified',
+            'value': item['value']
+        } for item in counseling_by_type_data
+    ]
     
     # Build response data
     response_data = {
@@ -187,11 +237,14 @@ def management_dashboard(request):
         'counselingByType': counseling_by_type
     }
     
-    # Process and add recent completed sessions
+    # Optimize: Use a more efficient query to get notes count
+    recent_completed_ids = [c.id for c in recent_completed]
+    notes_counts = dict(CounselingResult.objects.filter(
+        counseling__in=recent_completed_ids
+    ).values('counseling').annotate(count=Count('id')).values_list('counseling', 'count'))
+    
     for counseling in recent_completed:
-        nurses_count = counseling.nurses_id.count()
-        notes_count = CounselingResult.objects.filter(consultation=counseling).count()
-        
+        notes_count = notes_counts.get(counseling.id, 0)
         response_data['recentCounseling'].append({
             'id': counseling.id,
             'title': counseling.title,
@@ -220,6 +273,9 @@ def management_dashboard(request):
             ],
         })
     
+    # Cache the response data
+    cache.set(cache_key, response_data, 60 * 5)  # 5 minutes
+    
     return Response(response_data)
 
 
@@ -227,7 +283,7 @@ def management_dashboard(request):
 @permission_classes([IsAuthenticated])
 def nurse_dashboard(request):
     """
-    Dashboard data for nurse users
+    Dashboard data for nurse users with improved performance
     """
     # Check if user is a nurse
     user_role = request.user.role.name.lower() if request.user.role else ''
@@ -237,9 +293,18 @@ def nurse_dashboard(request):
             status=status.HTTP_403_FORBIDDEN
         )
     
+    # Use cache for faster repeat access
+    cache_key = f"nurse_dashboard_{request.user.id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return Response(cached_data)
+    
     # Get the nurse object
     try:
-        nurse = Nurse.objects.get(user=request.user)
+        # Use select_related to get user and department in one query
+        nurse = Nurse.objects.select_related(
+            'user', 'department', 'current_level'
+        ).get(user=request.user)
     except Nurse.DoesNotExist:
         return Response(
             {"error": "Nurse profile not found"},
@@ -249,12 +314,17 @@ def nurse_dashboard(request):
     # Get current date
     today = timezone.now()
     
-    # Get all counseling sessions for this nurse
-    nurse_counseling = Counseling.objects.filter(nurses_id=nurse)
+    # Use one optimized query for all counseling sessions
+    # Get all counseling sessions for this nurse with related data
+    nurse_counseling = Counseling.objects.filter(
+        nurses_id=nurse
+    ).select_related(
+        'status', 'counseling_type'
+    )
     
     # Get completed sessions 
-    completed_status = CounselingStatus.objects.get(id=3)
-    completed_counseling = nurse_counseling.filter(status=completed_status)
+    COMPLETED_STATUS_ID = 3
+    completed_counseling = nurse_counseling.filter(status__id=COMPLETED_STATUS_ID)
     
     # Get upcoming sessions
     upcoming_counseling = nurse_counseling.filter(
@@ -262,26 +332,41 @@ def nurse_dashboard(request):
         status__id__in=[1, 2]  # Assuming 1=Scheduled, 2=In Progress
     ).order_by('scheduled_date')[:5]
     
-    # Get sessions needing notes
-    # First, get all completed counseling IDs
+    # Use a more efficient query to find completed sessions needing notes
+    # Get all completed IDs
     completed_ids = list(completed_counseling.values_list('id', flat=True))
     
-    # Then, get all counseling IDs that already have notes from this nurse
+    # Get IDs of sessions that already have notes from this nurse
     notes_submitted_ids = list(CounselingResult.objects.filter(
-        consultation__in=completed_ids,
+        counseling__in=completed_ids,
         nurse=nurse
-    ).values_list('consultation_id', flat=True))
+    ).values_list('counseling_id', flat=True))
     
-    # Find sessions needing notes (completed but no notes submitted)
+    # Find sessions needing notes
     sessions_needing_notes = completed_counseling.exclude(
         id__in=notes_submitted_ids
     ).order_by('-scheduled_date')[:5]
     
-    # Get recent completed sessions with notes
+    # Get recent completed sessions with notes in a more efficient way
+    recent_completed = completed_counseling.order_by('-scheduled_date')[:5]
+    recent_completed_ids = [c.id for c in recent_completed]
+    
+    # Get all notes for the recent completed sessions in a single query
+    notes_dict = {}
+    for note in CounselingResult.objects.filter(
+        counseling__in=recent_completed_ids,
+        nurse=nurse
+    ):
+        notes_dict[note.counseling_id] = {
+            'id': note.id,
+            'content': note.nurse_feedback
+        }
+    
+    # Build completed sessions data with the notes information
     recent_completed_with_notes = []
-    for counseling in completed_counseling.order_by('-scheduled_date')[:5]:
-        note = CounselingResult.objects.filter(consultation=counseling, nurse=nurse).first()
-        has_notes = note is not None
+    for counseling in recent_completed:
+        note_info = notes_dict.get(counseling.id, None)
+        has_notes = note_info is not None
         
         recent_completed_with_notes.append({
             'id': counseling.id,
@@ -289,11 +374,11 @@ def nurse_dashboard(request):
             'scheduled_date': counseling.scheduled_date,
             'type': counseling.counseling_type.name if counseling.counseling_type else "General",
             'hasNotes': has_notes,
-            'noteId': note.id if note else None,
-            'noteContent': note.nurse_feedback if note else None
+            'noteId': note_info['id'] if note_info else None,
+            'noteContent': note_info['content'] if note_info else None
         })
     
-    # Calculate level progress and next level date
+    # Calculate level progress more efficiently
     level_progress = 0
     next_level_date = None
 
@@ -311,7 +396,7 @@ def nurse_dashboard(request):
         if total_days > 0:
             level_progress = min(100, round((elapsed_days / total_days) * 100))
     
-    # Build response data
+    # Build response data with more efficient structure
     response_data = {
         'nurseInfo': {
             'name': f"{nurse.user.first_name} {nurse.user.last_name}",
@@ -323,9 +408,24 @@ def nurse_dashboard(request):
             'specialization': nurse.specialization
         },
         'counselingSessions': {
-            'upcoming': [],
+            # Process sessions directly here instead of looping later
+            'upcoming': [
+                {
+                    'id': counseling.id,
+                    'title': counseling.title,
+                    'scheduled_date': counseling.scheduled_date,
+                    'type': counseling.counseling_type.name if counseling.counseling_type else "General"
+                } for counseling in upcoming_counseling
+            ],
             'completed': recent_completed_with_notes,
-            'needNotes': []
+            'needNotes': [
+                {
+                    'id': counseling.id,
+                    'title': counseling.title,
+                    'scheduled_date': counseling.scheduled_date,
+                    'type': counseling.counseling_type.name if counseling.counseling_type else "General"
+                } for counseling in sessions_needing_notes
+            ]
         },
         'stats': {
             'totalSessions': nurse_counseling.count(),
@@ -334,26 +434,10 @@ def nurse_dashboard(request):
         }
     }
     
-    # Process and add upcoming sessions
-    for counseling in upcoming_counseling:
-        response_data['counselingSessions']['upcoming'].append({
-            'id': counseling.id,
-            'title': counseling.title,
-            'scheduled_date': counseling.scheduled_date,
-            'type': counseling.counseling_type.name if counseling.counseling_type else "General"
-        })
-    
-    # Process and add sessions needing notes
-    for counseling in sessions_needing_notes:
-        response_data['counselingSessions']['needNotes'].append({
-            'id': counseling.id,
-            'title': counseling.title,
-            'scheduled_date': counseling.scheduled_date,
-            'type': counseling.counseling_type.name if counseling.counseling_type else "General"
-        })
+    # Cache the response data
+    cache.set(cache_key, response_data, 60 * 2)  # 2 minutes
     
     return Response(response_data)
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -372,7 +456,8 @@ def mark_counseling_completed(request, counseling_id):
         )
     
     try:
-        counseling = Counseling.objects.get(pk=counseling_id)
+        # Use select_related to get status in one query
+        counseling = Counseling.objects.select_related('status').get(pk=counseling_id)
         
         # Check if scheduled time has passed
         if counseling.scheduled_date and counseling.scheduled_date > timezone.now():
@@ -382,8 +467,23 @@ def mark_counseling_completed(request, counseling_id):
             )
         
         # Update status to completed (assuming 3 is the "completed" status code)
-        counseling.status_id = 3
-        counseling.save()
+        COMPLETED_STATUS_ID = 3
+        counseling.status_id = COMPLETED_STATUS_ID
+        counseling.save(update_fields=['status_id'])  # Update only the changed field
+        
+        # Clear cache for dashboards since this affects metrics
+        invalidate_dashboard_caches()        
+        # # Create audit log for this action
+        # try:
+        #     AuditLog.objects.create(
+        #         user=request.user,
+        #         action=f"Marked counseling session #{counseling_id} as completed",
+        #         action_time=timezone.now(),
+        #         ip_address=request.META.get('REMOTE_ADDR', '')
+        #     )
+        # except Exception as audit_error:
+        #     # Log the error but don't fail the request
+        #     print(f"Failed to create audit log: {str(audit_error)}")
         
         serializer = CounselingSerializer(counseling)
         return Response(serializer.data)
@@ -393,7 +493,6 @@ def mark_counseling_completed(request, counseling_id):
             {"error": "Counseling session not found"},
             status=status.HTTP_404_NOT_FOUND
         )
-
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -435,8 +534,81 @@ def update_profile_picture(request):
     serializer = UserProfileSerializer(user)
     return Response(serializer.data)
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def admin_dashboard(request):
+    """Dashboard data for admin users with improved performance"""
+    # Check if user is admin
+    if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
+        return Response(
+            {"error": "Only admin users can access this endpoint"},
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Use cache for repeated access
+    cache_key = f"admin_dashboard_{request.user.id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return Response(cached_data)
+    
+    # Get counts more efficiently with a single query using aggregation
+    user_stats = User.objects.aggregate(
+        user_count=Count('id'),
+        nurse_count=Count('nurse', distinct=True),
+        management_count=Count('management', distinct=True)
+    )
+    
+    department_count = Department.objects.count()
+    
+    # Get recent login activity with related user data
+    recent_logins = LoginHistory.objects.select_related('user').order_by('-login_time')[:5]
+    
+    # Get active sessions (no logout time)
+    active_sessions = LoginHistory.objects.filter(logout_time__isnull=True).count()
+    
+    # Get users by role in a single query using aggregation
+    users_by_role = User.objects.values('role__name').annotate(count=Count('id'))
+    
+    # Build response data
+    response_data = {
+        'counts': {
+            'users': user_stats['user_count'],
+            'nurses': user_stats['nurse_count'],
+            'management': user_stats['management_count'],
+            'departments': department_count,
+            'active_sessions': active_sessions
+        },
+        'recent_logins': [],
+        'users_by_role': [
+            {
+                'role': item['role__name'] or 'Unassigned',
+                'count': item['count']
+            } for item in users_by_role
+        ]
+    }
+    
+    # Process recent logins
+    for login in recent_logins:
+        response_data['recent_logins'].append({
+            'id': login.id,
+            'user': {
+                'id': login.user.id,
+                'username': login.user.username,
+                'name': f"{login.user.first_name} {login.user.last_name}"
+            },
+            'login_time': login.login_time,
+            'logout_time': login.logout_time,
+            'ip_address': login.ip_address,
+            'device_info': login.device_info,
+            'status': login.status
+        })
+    
+    # Cache the response data
+    cache.set(cache_key, response_data, 60 * 5)  # 5 minutes
+    
+    return Response(response_data)
 
-class AdminUserViewSet(viewsets.ModelViewSet):
+class AdminUserViewSet(DatabaseRetryMixin, viewsets.ModelViewSet):
     """ViewSet for admin to manage users"""
     serializer_class = AdminUserSerializer
     permission_classes = [IsAuthenticated]
@@ -447,8 +619,13 @@ class AdminUserViewSet(viewsets.ModelViewSet):
         if not hasattr(user, 'role') or user.role.name.lower() != 'admin':
             return User.objects.none()
         
-        # Get all users
-        queryset = User.objects.all().select_related('role')
+        # Use select_related and annotated fields for faster queries
+        queryset = User.objects.select_related('role').all()
+        
+        # Add full name annotation for more efficient filtering
+        queryset = queryset.annotate(
+            full_name=Concat('first_name', Value(' '), 'last_name', output_field=CharField())
+        )
         
         # Filter by search query if provided
         search = self.request.query_params.get('search', None)
@@ -456,8 +633,7 @@ class AdminUserViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(username__icontains=search) |
                 Q(email__icontains=search) |
-                Q(first_name__icontains=search) |
-                Q(last_name__icontains=search)
+                Q(full_name__icontains=search)  # Use the annotated field
             )
         
         # Filter by role if provided
@@ -493,49 +669,57 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        # Create basic user first
-        serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+        # Use database transaction to ensure atomic operation
+        from django.db import transaction
         
-        # Create nurse or management profile based on user type
-        if data.get('userType') == 'nurse':
-            nurse_data = {
-                'user': user.id,
-                'nurse_account_id': data.get('nurse_account_id'),
-                'current_level': data.get('level', None),
-                'hire_date': data.get('hire_date'),
-                'years_of_service': 0,  # Will be calculated on save
-                'department': data.get('department'),
-                'specialization': data.get('specialization', ''),
-                'is_active': True
-            }
-            nurse_serializer = NurseSimpleSerializer(data=nurse_data)
-            if nurse_serializer.is_valid():
-                nurse_serializer.save()
-            else:
-                # Rollback user creation if nurse profile creation fails
-                user.delete()
-                return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        elif data.get('userType') == 'management':
-            management_data = {
-                'user': user.id,
-                'management_account_id': data.get('management_account_id'),
-                'department': data.get('department'),
-                'position': data.get('position', ''),
-                'is_active': True
-            }
-            management_serializer = ManagementSerializers(data=management_data)
-            if management_serializer.is_valid():
-                management_serializer.save()
-            else:
-                # Rollback user creation if management profile creation fails
-                user.delete()
-                return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Return created user
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        try:
+            with transaction.atomic():
+                # Create basic user first
+                serializer = self.get_serializer(data=data)
+                serializer.is_valid(raise_exception=True)
+                user = serializer.save()
+                
+                # Create nurse or management profile based on user type
+                if data.get('userType') == 'nurse':
+                    nurse_data = {
+                        'user': user.id,
+                        'nurse_account_id': data.get('nurse_account_id'),
+                        'current_level': data.get('level', None),
+                        'hire_date': data.get('hire_date'),
+                        'years_of_service': 0,  # Will be calculated on save
+                        'department': data.get('department'),
+                        'specialization': data.get('specialization', ''),
+                        'is_active': True
+                    }
+                    nurse_serializer = NurseSimpleSerializer(data=nurse_data)
+                    if nurse_serializer.is_valid():
+                        nurse_serializer.save()
+                    else:
+                        # Exception in transaction will cause rollback
+                        raise ValueError(nurse_serializer.errors)
+                
+                elif data.get('userType') == 'management':
+                    management_data = {
+                        'user': user.id,
+                        'management_account_id': data.get('management_account_id'),
+                        'department': data.get('department'),
+                        'position': data.get('position', ''),
+                        'is_active': True
+                    }
+                    management_serializer = ManagementSerializers(data=management_data)
+                    if management_serializer.is_valid():
+                        management_serializer.save()
+                    else:
+                        # Exception in transaction will cause rollback
+                        raise ValueError(management_serializer.errors)
+                
+                # Clear admin dashboard cache
+                invalidate_dashboard_caches()                
+                # Return created user
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+                
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
     def update(self, request, *args, **kwargs):
         # Check if user is admin
@@ -554,91 +738,93 @@ class AdminUserViewSet(viewsets.ModelViewSet):
         else:
             data.pop('password', None)
         
-        # Update basic user info
-        serializer = self.get_serializer(user, data=data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        updated_user = serializer.save()
+        # Use database transaction for atomic updates
+        from django.db import transaction
         
-        # Update nurse or management profile based on user type
-        if data.get('userType') == 'nurse':
-            # Check if nurse profile exists
-            try:
-                nurse = Nurse.objects.get(user=user)
-                nurse_data = {
-                    'nurse_account_id': data.get('nurse_account_id', nurse.nurse_account_id),
-                    'current_level': data.get('level', nurse.current_level_id),
-                    'hire_date': data.get('hire_date', nurse.hire_date),
-                    'department': data.get('department', nurse.department_id),
-                    'specialization': data.get('specialization', nurse.specialization),
-                }
-                nurse_serializer = NurseSimpleSerializer(nurse, data=nurse_data, partial=True)
-                if nurse_serializer.is_valid():
-                    nurse_serializer.save()
-                else:
-                    return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            except Nurse.DoesNotExist:
-                # Create nurse profile if it doesn't exist
-                nurse_data = {
-                    'user': user.id,
-                    'nurse_account_id': data.get('nurse_account_id'),
-                    'current_level': data.get('level', None),
-                    'hire_date': data.get('hire_date'),
-                    'years_of_service': 0,  # Will be calculated on save
-                    'department': data.get('department'),
-                    'specialization': data.get('specialization', ''),
-                    'is_active': True
-                }
-                nurse_serializer = NurseSimpleSerializer(data=nurse_data)
-                if nurse_serializer.is_valid():
-                    nurse_serializer.save()
-                else:
-                    return Response(nurse_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                # Update basic user info
+                serializer = self.get_serializer(user, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                updated_user = serializer.save()
                 
-                # Delete management profile if it exists
-                try:
-                    management = Management.objects.get(user=user)
-                    management.delete()
-                except Management.DoesNotExist:
-                    pass
+                # Update nurse or management profile based on user type
+                if data.get('userType') == 'nurse':
+                    # Check if nurse profile exists
+                    try:
+                        nurse = Nurse.objects.get(user=user)
+                        nurse_data = {
+                            'nurse_account_id': data.get('nurse_account_id', nurse.nurse_account_id),
+                            'current_level': data.get('level', nurse.current_level_id),
+                            'hire_date': data.get('hire_date', nurse.hire_date),
+                            'department': data.get('department', nurse.department_id),
+                            'specialization': data.get('specialization', nurse.specialization),
+                        }
+                        nurse_serializer = NurseSimpleSerializer(nurse, data=nurse_data, partial=True)
+                        if nurse_serializer.is_valid():
+                            nurse_serializer.save()
+                        else:
+                            raise ValueError(nurse_serializer.errors)
+                    except Nurse.DoesNotExist:
+                        # Create nurse profile if it doesn't exist
+                        nurse_data = {
+                            'user': user.id,
+                            'nurse_account_id': data.get('nurse_account_id'),
+                            'current_level': data.get('level', None),
+                            'hire_date': data.get('hire_date'),
+                            'years_of_service': 0,  # Will be calculated on save
+                            'department': data.get('department'),
+                            'specialization': data.get('specialization', ''),
+                            'is_active': True
+                        }
+                        nurse_serializer = NurseSimpleSerializer(data=nurse_data)
+                        if nurse_serializer.is_valid():
+                            nurse_serializer.save()
+                        else:
+                            raise ValueError(nurse_serializer.errors)
+                        
+                        # Delete management profile if it exists - more efficient
+                        Management.objects.filter(user=user).delete()
+                        
+                elif data.get('userType') == 'management':
+                    # Similar optimized handling for management profile
+                    try:
+                        management = Management.objects.get(user=user)
+                        management_data = {
+                            'management_account_id': data.get('management_account_id', management.management_account_id),
+                            'department': data.get('department', management.department_id),
+                            'position': data.get('position', management.position),
+                        }
+                        management_serializer = ManagementSerializers(management, data=management_data, partial=True)
+                        if management_serializer.is_valid():
+                            management_serializer.save()
+                        else:
+                            raise ValueError(management_serializer.errors)
+                    except Management.DoesNotExist:
+                        # Create management profile if it doesn't exist
+                        management_data = {
+                            'user': user.id,
+                            'management_account_id': data.get('management_account_id'),
+                            'department': data.get('department'),
+                            'position': data.get('position', ''),
+                            'is_active': True
+                        }
+                        management_serializer = ManagementSerializers(data=management_data)
+                        if management_serializer.is_valid():
+                            management_serializer.save()
+                        else:
+                            raise ValueError(management_serializer.errors)
+                        
+                        # Delete nurse profile if it exists - more efficient
+                        Nurse.objects.filter(user=user).delete()
                 
-        elif data.get('userType') == 'management':
-            # Check if management profile exists
-            try:
-                management = Management.objects.get(user=user)
-                management_data = {
-                    'management_account_id': data.get('management_account_id', management.management_account_id),
-                    'department': data.get('department', management.department_id),
-                    'position': data.get('position', management.position),
-                }
-                management_serializer = ManagementSerializers(management, data=management_data, partial=True)
-                if management_serializer.is_valid():
-                    management_serializer.save()
-                else:
-                    return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-            except Management.DoesNotExist:
-                # Create management profile if it doesn't exist
-                management_data = {
-                    'user': user.id,
-                    'management_account_id': data.get('management_account_id'),
-                    'department': data.get('department'),
-                    'position': data.get('position', ''),
-                    'is_active': True
-                }
-                management_serializer = ManagementSerializers(data=management_data)
-                if management_serializer.is_valid():
-                    management_serializer.save()
-                else:
-                    return Response(management_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                # Clear admin dashboard cache
+                invalidate_dashboard_caches()                
+                # Return updated user
+                return Response(serializer.data)
                 
-                # Delete nurse profile if it exists
-                try:
-                    nurse = Nurse.objects.get(user=user)
-                    nurse.delete()
-                except Nurse.DoesNotExist:
-                    pass
-        
-        # Return updated user
-        return Response(serializer.data)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
     def destroy(self, request, *args, **kwargs):
         # Check if user is admin
@@ -655,8 +841,12 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        return super().destroy(request, *args, **kwargs)
-
+        # Clear cache after deletion
+        response = super().destroy(request, *args, **kwargs)
+        if response.status_code == 204:  # Successfully deleted
+            invalidate_dashboard_caches()        
+        return response
+    
 class LoginHistoryViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for admin to view login history"""
     serializer_class = None  # You'll need to create a serializer for this
@@ -691,69 +881,6 @@ class LoginHistoryViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(login_time__lte=end_date)
             
         return queryset.order_by('-login_time')
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def admin_dashboard(request):
-    """Dashboard data for admin users"""
-    # Check if user is admin
-    if not hasattr(request.user, 'role') or request.user.role.name.lower() != 'admin':
-        return Response(
-            {"error": "Only admin users can access this endpoint"},
-            status=status.HTTP_403_FORBIDDEN
-        )
-    
-    # Get counts for dashboard
-    user_count = User.objects.count()
-    nurse_count = Nurse.objects.count()
-    management_count = Management.objects.count()
-    department_count = Department.objects.count()
-    
-    # Get recent login activity
-    recent_logins = LoginHistory.objects.all().order_by('-login_time')[:5]
-    
-    # Get active sessions (no logout time)
-    active_sessions = LoginHistory.objects.filter(logout_time__isnull=True).count()
-    
-    # Get users by role
-    users_by_role = []
-    for role in Roles.objects.all():
-        count = User.objects.filter(role=role).count()
-        users_by_role.append({
-            'role': role.name,
-            'count': count
-        })
-    
-    # Build response data
-    response_data = {
-        'counts': {
-            'users': user_count,
-            'nurses': nurse_count,
-            'management': management_count,
-            'departments': department_count,
-            'active_sessions': active_sessions
-        },
-        'recent_logins': [],
-        'users_by_role': users_by_role
-    }
-    
-    # Process recent logins
-    for login in recent_logins:
-        response_data['recent_logins'].append({
-            'id': login.id,
-            'user': {
-                'id': login.user.id,
-                'username': login.user.username,
-                'name': f"{login.user.first_name} {login.user.last_name}"
-            },
-            'login_time': login.login_time,
-            'logout_time': login.logout_time,
-            'ip_address': login.ip_address,
-            'device_info': login.device_info,
-            'status': login.status
-        })
-    
-    return Response(response_data)
 
 class CustomTokenRefresh(TokenRefreshView):
     def post(self, request, *args, **kwargs):
@@ -988,36 +1115,196 @@ class NurseLevelView(APIView):
 
 class CounselingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
-    queryset = Counseling.objects.all()
     serializer_class = CounselingSerializer
     
+    def get_queryset(self):
+        """
+        Return a queryset filtered by user role and optimized with select_related and prefetch_related
+        """
+        user = self.request.user
+        user_role = user.role.name.lower() if user.role else ''
+        
+        # Start with a base optimized queryset
+        queryset = Counseling.objects.select_related(
+            'management', 'status', 'counseling_type'
+        ).prefetch_related(
+            Prefetch('nurses_id', queryset=Nurse.objects.select_related('user', 'department', 'current_level')),
+            'material_files'
+        )
+        
+        # Apply role-based filtering
+        if user_role == 'nurse':
+            try:
+                nurse = Nurse.objects.get(user=user)
+                queryset = queryset.filter(nurses_id=nurse)
+            except Nurse.DoesNotExist:
+                return Counseling.objects.none()
+        elif user_role == 'management':
+            try:
+                management = Management.objects.get(user=user)
+                queryset = queryset.filter(management=management)
+            except Management.DoesNotExist:
+                return Counseling.objects.none()
+        elif user_role != 'admin':
+            return Counseling.objects.none()
+        
+        # Apply any search filters from request
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) |
+                Q(description__icontains=search) |
+                Q(nurses_id__user__first_name__icontains=search) |
+                Q(nurses_id__user__last_name__icontains=search)
+            ).distinct()
+        
+        # Apply status filter if provided
+        status_id = self.request.query_params.get('status')
+        if status_id and status_id.isdigit():
+            queryset = queryset.filter(status_id=status_id)
+        
+        # Apply date range filter if provided
+        start_date = self.request.query_params.get('start_date')
+        if start_date:
+            queryset = queryset.filter(scheduled_date__gte=start_date)
+            
+        end_date = self.request.query_params.get('end_date')
+        if end_date:
+            queryset = queryset.filter(scheduled_date__lte=end_date)
+        
+        return queryset
+    
     def perform_create(self, serializer):
-        serializer.save(management=self.request.user.management)
-
+        """Save the counseling with current user's management profile and clear caches"""
+        try:
+            # Get management profile in a try-except block to prevent errors
+            management = Management.objects.get(user=self.request.user)
+            counseling = serializer.save(management=management)
+            
+            # Clear dashboard caches since a new counseling session was created
+            invalidate_dashboard_caches()            
+            # Create audit log entry
+            # AuditLog.objects.create(
+            #     user=self.request.user,
+            #     action=f"Created counseling session: {counseling.title}",
+            #     action_time=timezone.now(),
+            #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+            # )
+            
+        except Management.DoesNotExist:
+            # Fall back to default behavior if management profile doesn't exist
+            serializer.save()
+    
+    def perform_update(self, serializer):
+        """Update the counseling instance and clear caches"""
+        counseling = serializer.save()
+        
+        # Clear dashboard caches since a counseling session was updated
+        invalidate_dashboard_caches()        
+        # Create audit log entry
+        # AuditLog.objects.create(
+        #     user=self.request.user,
+        #     action=f"Updated counseling session: {counseling.title}",
+        #     action_time=timezone.now(),
+        #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+        # )
+    
+    def perform_destroy(self, instance):
+        """Delete the counseling instance and clear caches"""
+        title = instance.title
+        instance.delete()
+        
+        # Clear dashboard caches since a counseling session was deleted
+        invalidate_dashboard_caches()        
+        # Create audit log entry
+        # AuditLog.objects.create(
+        #     user=self.request.user,
+        #     action=f"Deleted counseling session: {title}",
+        #     action_time=timezone.now(),
+        #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+        # )
+    
     @action(detail=True, methods=['post'])
     def remove_file(self, request, pk=None):
+        """
+        Remove a material file from a counseling session
+        """
         counseling = self.get_object()
         file_id = request.data.get('file_id')
         
         try:
-            material = counseling.material_files.get(id=file_id)
-            counseling.material_files.remove(material)
-            # Signal will handle the file deletion
+            # Use filter().exists() first to avoid fetching the object if not needed
+            if not counseling.material_files.filter(id=file_id).exists():
+                return Response(
+                    {"detail": "File not found"}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Remove the file
+            counseling.material_files.remove(file_id)
+            
+            # Create audit log entry
+            # AuditLog.objects.create(
+            #     user=request.user,
+            #     action=f"Removed file {file_id} from counseling session: {counseling.title}",
+            #     action_time=timezone.now(),
+            #     ip_address=request.META.get('REMOTE_ADDR', '')
+            # )
+            
             return Response(status=status.HTTP_204_NO_CONTENT)
-        except Materials.DoesNotExist:
+            
+        except Exception as e:
             return Response(
-                {"detail": "File not found"}, 
-                status=status.HTTP_404_NOT_FOUND
+                {"detail": f"Error removing file: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
             )
+            
+    @action(detail=True, methods=['get'])
+    @cache_page(60 * 5)  # Cache for 5 minutes
+    def get_summary(self, request, pk=None):
+        """
+        Get a summary of the counseling session including statistics
+        """
+        counseling = self.get_object()
+        
+        # Get the notes count with a single query
+        notes_count = CounselingResult.objects.filter(counseling=counseling).count()
+        
+        # Get the nurses count
+        nurses_count = counseling.nurses_id.count()
+        
+        # Check if all nurses have submitted notes
+        notes_complete = notes_count >= nurses_count
+        
+        # Build the summary data
+        summary_data = {
+            'id': counseling.id,
+            'title': counseling.title,
+            'scheduled_date': counseling.scheduled_date,
+            'status': {
+                'id': counseling.status.id,
+                'name': counseling.status.name
+            },
+            'type': {
+                'id': counseling.counseling_type.id if counseling.counseling_type else None,
+                'name': counseling.counseling_type.name if counseling.counseling_type else 'General'
+            },
+            'notes_count': notes_count,
+            'nurses_count': nurses_count,
+            'notes_complete': notes_complete,
+            'days_since_scheduled': (timezone.now().date() - counseling.scheduled_date.date()).days if counseling.scheduled_date else None
+        }
+        
+        return Response(summary_data)
             
 class CounselingResultViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for CounselingResult model (Session Notes)
+    ViewSet for CounselingResult model (Session Notes) with optimized performance
     """
     serializer_class = CounselingResultSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['nurse_feedback', 'consultation__title', 'nurse__name']
+    search_fields = ['nurse_feedback', 'counseling__title', 'nurse__user__first_name', 'nurse__user__last_name']
     ordering_fields = ['created_at', 'updated_at']
     ordering = ['-created_at']  # Default order is newest first
 
@@ -1033,38 +1320,96 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
 
         role = user.role.name.lower() if user.role else ''
         
+        # Base query with optimized joins
+        queryset = CounselingResult.objects.select_related(
+            'counseling', 
+            'counseling__status',
+            'counseling__counseling_type',
+            'nurse', 
+            'nurse__user',
+            'nurse__department',
+            'nurse__current_level'
+        )
+        
         if role in ['management', 'admin']:
             # Management/admin can see all notes
-            queryset = CounselingResult.objects.all()
+            pass  # No additional filtering needed
         elif role == 'nurse':
             # Nurses can only see their own notes
             try:
                 nurse = Nurse.objects.get(user=user)
-                queryset = CounselingResult.objects.filter(nurse=nurse)
+                queryset = queryset.filter(nurse=nurse)
             except Nurse.DoesNotExist:
                 return CounselingResult.objects.none()
         else:
             return CounselingResult.objects.none()
         
-        # Manual filtering
-        consultation = self.request.query_params.get('consultation', None)
-        if consultation:
-            queryset = queryset.filter(consultation_id=consultation)
+        # Apply filters from query parameters
+        # counseling filter
+        counseling = self.request.query_params.get('counseling', None)
+        if counseling:
+            queryset = queryset.filter(counseling_id=counseling)
             
+        # Nurse filter
         nurse = self.request.query_params.get('nurse', None)
         if nurse:
             queryset = queryset.filter(nurse_id=nurse)
         
-        # Search filtering
-        search = self.request.query_params.get('search', None)
-        if search:
-            queryset = queryset.filter(
-                Q(nurse_feedback__icontains=search) |
-                Q(consultation__title__icontains=search) |
-                Q(nurse__name__icontains=search)
-            )
+        # Date range filters
+        start_date = self.request.query_params.get('start_date', None)
+        if start_date:
+            queryset = queryset.filter(created_at__gte=start_date)
+            
+        end_date = self.request.query_params.get('end_date', None)
+        if end_date:
+            queryset = queryset.filter(created_at__lte=end_date)
+            
+        # Search filtering - handled by filter_backends
         
         return queryset
+    
+    def perform_create(self, serializer):
+        """Create a note and clear relevant caches"""
+        note = serializer.save()
+        
+        # Clear any cached data related to counseling dashboards
+        invalidate_dashboard_caches()        
+        # Create audit log
+        # AuditLog.objects.create(
+        #     user=self.request.user,
+        #     action=f"Created note for counseling session #{note.counseling_id}",
+        #     action_time=timezone.now(),
+        #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+        # )
+    
+    def perform_update(self, serializer):
+        """Update a note and clear relevant caches"""
+        note = serializer.save()
+        
+        # Clear any cached data related to counseling dashboards
+        invalidate_dashboard_caches()        
+        # Create audit log
+        # AuditLog.objects.create(
+        #     user=self.request.user,
+        #     action=f"Updated note for counseling session #{note.counseling_id}",
+        #     action_time=timezone.now(),
+        #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+        # )
+    
+    def perform_destroy(self, instance):
+        """Delete a note and clear relevant caches"""
+        counseling_id = instance.counseling_id
+        instance.delete()
+        
+        # Clear any cached data related to counseling dashboards
+        invalidate_dashboard_caches()        
+        # # Create audit log
+        # AuditLog.objects.create(
+        #     user=self.request.user,
+        #     action=f"Deleted note for counseling session #{counseling_id}",
+        #     action_time=timezone.now(),
+        #     ip_address=self.request.META.get('REMOTE_ADDR', '')
+        # )
 
     @action(detail=False, methods=['get'], url_path=r'(?P<counseling_id>\d+)/nurse/(?P<nurse_id>\d+)')
     def get_note_by_counseling_and_nurse(self, request, counseling_id=None, nurse_id=None):
@@ -1072,6 +1417,7 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
         Get a specific note for a counseling session from a specific nurse
         """
         try:
+            # Check if counseling and nurse exist (using get_object_or_404 for cleaner code)
             counseling = get_object_or_404(Counseling, pk=counseling_id)
             nurse = get_object_or_404(Nurse, pk=nurse_id)
             
@@ -1090,7 +1436,18 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_404_NOT_FOUND
                     )
             
-            note = get_object_or_404(CounselingResult, consultation=counseling, nurse=nurse)
+            # Use the optimized query with select_related
+            note = get_object_or_404(
+                CounselingResult.objects.select_related(
+                    'counseling', 
+                    'nurse', 
+                    'nurse__user', 
+                    'nurse__department'
+                ), 
+                counseling=counseling, 
+                nurse=nurse
+            )
+            
             serializer = self.get_serializer(note)
             return Response(serializer.data)
         except CounselingResult.DoesNotExist:
@@ -1113,10 +1470,14 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
+        cache_key = f"notes_by_counseling_{request.user.id}_{request.query_params}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
         # Get query parameters
         search = request.query_params.get('search', '')
         
-        # Get counseling sessions with notes count
+        # Define an optimized base query for counseling with notes
         counseling_with_notes = Counseling.objects.filter(
             status__id=3  # Only completed sessions
         ).annotate(
@@ -1134,21 +1495,34 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
                 Q(counselingresult__nurse_feedback__icontains=search)
             ).distinct()
         
-        # Prefetch related notes with their nurses to avoid N+1 queries
+        # Optimize with prefetch_related to avoid N+1 queries
         counseling_with_notes = counseling_with_notes.prefetch_related(
             Prefetch(
                 'counselingresult_set',
-                queryset=CounselingResult.objects.select_related('nurse__user')
+                queryset=CounselingResult.objects.select_related('nurse__user', 'nurse__department', 'nurse__current_level')
             ),
-            'nurses_id__user',
+            Prefetch(
+                'nurses_id',
+                queryset=Nurse.objects.select_related('user', 'department', 'current_level')
+            ),
             'status',
             'counseling_type',
-            'management'
+            'management__user'
         )
+        
+        # Pagination for large result sets
+        page_size = int(request.query_params.get('page_size', 20))
+        page = int(request.query_params.get('page', 1))
+        
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        # Apply slice for pagination
+        paginated_counseling = counseling_with_notes[start:end]
         
         # Serialize the data
         result = []
-        for counseling in counseling_with_notes:
+        for counseling in paginated_counseling:
             notes = []
             for note in counseling.counselingresult_set.all():
                 notes.append({
@@ -1194,8 +1568,23 @@ class CounselingResultViewSet(viewsets.ModelViewSet):
                 'notes_count': len(notes)
             })
         
-        return Response(result)
-
+        # Add pagination metadata
+        total_count = counseling_with_notes.count()
+        pagination = {
+            'total_count': total_count,
+            'total_pages': (total_count + page_size - 1) // page_size,
+            'current_page': page,
+            'page_size': page_size
+        }
+        
+        response_data = {
+            'pagination': pagination,
+            'results': result
+        }
+        
+        cache.set(cache_key, response_data, 60 * 5)  # 5 minutes
+        return Response(response_data)
+        
 class RolesViewSet(viewsets.ModelViewSet):
     queryset = Roles.objects.all()
     serializer_class = RoleSerializer

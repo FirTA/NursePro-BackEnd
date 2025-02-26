@@ -28,7 +28,7 @@ load_dotenv()
 SECRET_KEY = os.getenv('SECRET_KEY')
 print(SECRET_KEY)
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = 'False'
+DEBUG = 'True'
 print(DEBUG)
 # Define specific hosts instead of wildcard '*' for production
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '.vercel.app', '.now.sh']
@@ -143,8 +143,10 @@ DATABASES = {
         'PASSWORD': 'BonCabe15.EIGER',
         'HOST': 'aws-0-ap-southeast-1.pooler.supabase.com',
         'PORT': '5432',
+        'CONN_MAX_AGE': 60,  # Keep connections alive for 60 seconds
         'OPTIONS': {
             'sslmode': 'require',
+            'connect_timeout': 10,
         }
     }
 }
@@ -190,9 +192,9 @@ CELERY_TIMEZONE = 'Asia/Jakarta'
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 # Supabase configuration
-SUPABASE_URL = os.environ.get('https://ilgcqsimufbmfbyrfgta.supabase.co/storage/v1/s3', '')
-SUPABASE_KEY = os.environ.get('4e95e7cedef43c870daf91802cd334bf37cec1bcbccf726a1aa070bbe0055e4f', '')
-SUPABASE_BUCKET_NAME = os.environ.get('media', 'media')
+SUPABASE_URL = 'https://ilgcqsimufbmfbyrfgta.supabase.co/storage/v1/s3'
+SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlsZ2Nxc2ltdWZibWZieXJmZ3RhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDA1MzIyNTUsImV4cCI6MjA1NjEwODI1NX0.R5Eg0nI5Do-pDpUTxv8SujaSheABDTYhU4JeJLN9kcE'
+SUPABASE_BUCKET_NAME = 'media'
 
 # Use WhiteNoise for static files
 STATIC_URL = '/static/'
@@ -201,7 +203,7 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Use Supabase for media files
 MEDIA_URL = '/media/'
-DEFAULT_FILE_STORAGE = 'Backend.storage_backends.SupabaseStorage'
+DEFAULT_FILE_STORAGE = 'Backend.SupabaseStorage.SupabaseStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 

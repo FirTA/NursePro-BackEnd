@@ -11,6 +11,8 @@ from django.utils.timezone import localtime
 from django.core.files.storage import default_storage
 from dateutil.relativedelta import relativedelta
 from django.utils import timezone
+from django.contrib.contenttypes.models import ContentType
+from django.contrib.contenttypes.fields import GenericForeignKey
 # Create your models here.
 
 class Roles(models.Model):
@@ -324,40 +326,44 @@ class CounselingStatus(models.Model):
         
 class Materials(models.Model):
     title = models.CharField(max_length=200, null=True, blank=True)
-    file_path = models.FileField(upload_to="documnets/")
+    file_path = models.FileField(upload_to="documents/")
     size = models.PositiveBigIntegerField(editable=True, null=True, blank=True)
     size_readable = models.CharField(max_length=20, editable=True, null=True, blank=True)  # human-readable size
     created_at = models.DateTimeField(auto_now_add=True)
-
-
+    
     def save(self, *args, **kwargs):
-        # Save the object first so the file is available
-
-        
+        # Set the title if not provided
         if self.file_path and not self.title:
             self.title = os.path.basename(self.file_path.name)
-        super().save(*args,**kwargs)
         
-        if self.file_path:
-            file_path = self.file_path.path
-            print(self.file_path,file_path)
-            if os.path.exists(file_path):
-                self.size  = os.path.getsize(file_path)
+        # Save the model first so the file is saved to storage
+        super().save(*args, **kwargs)
+        
+        # Now get the file size from storage if possible
+        if self.file_path and not self.size:
+            try:
+                # For Supabase, get the size of the uploaded file
+                self.size = default_storage.size(self.file_path.name)
                 self.size_readable = self._calculate_human_readable_size(self.size)
+                # Update just these fields to avoid a loop
                 super().save(update_fields=["size", "size_readable"])
-
+            except Exception as e:
+                print(f"Error getting file size: {e}")
+    
     def delete(self, *args, **kwargs):
         """Delete file from storage when instance is deleted."""
         if self.file_path:
-            file_path = self.file_path.path
-            if os.path.exists(file_path):
-                default_storage.delete(file_path)
+            try:
+                # Delete the file through the storage backend
+                default_storage.delete(self.file_path.name)
+            except Exception as e:
+                print(f"Error deleting file: {e}")
         super().delete(*args, **kwargs)
-    
+   
     @property
     def formatted_created_at(self):
-       return localtime(self.created_at).strftime('%d/%m/%Y, %H:%M')     
-                            
+        return localtime(self.created_at).strftime('%d/%m/%Y, %H:%M')    
+                           
     def _calculate_human_readable_size(self, size):
         """Convert size in bytes to a human-readable format."""
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -365,10 +371,10 @@ class Materials(models.Model):
                 return f"{size:.2f} {unit}"
             size /= 1024
         return f"{size:.2f} PB"
-    
+   
     def __str__(self):
         return f"{self.title} ({self.size_readable})"
-    
+   
     class Meta:
         db_table = 'materials'
        
@@ -393,7 +399,7 @@ class Counseling(models.Model):
         db_table = 'counseling'
 
 class CounselingResult(models.Model):
-    consultation = models.ForeignKey(Counseling, on_delete=models.CASCADE)
+    counseling = models.ForeignKey(Counseling, on_delete=models.CASCADE)
     nurse = models.ForeignKey(Nurse, on_delete=models.SET_NULL, null=True)
     nurse_feedback = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -406,17 +412,34 @@ class CounselingResult(models.Model):
               
 class AuditLog(models.Model):
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    action_type = models.CharField(max_length=20,null=False)
-    table_name = models.CharField(max_length=100,null=False)
-    record_id = models.IntegerField()
-    old_value = models.TextField()
-    new_value = models.TextField()
-    ip_address = models.CharField(max_length=100)
-    timestamp = models.TimeField()
+    action_type = models.CharField(max_length=20, choices=[
+        ('CREATE', 'Create'),
+        ('UPDATE', 'Update'),
+        ('DELETE', 'Delete'),
+        ('VIEW', 'View'),
+    ])
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    content_object = GenericForeignKey('content_type', 'object_id')
+    
+    description = models.TextField(blank=True)
+    data = models.JSONField(null=True, blank=True)  # Store changes as JSON
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        ordering = ['timestamp'] 
-        db_table ='auditlog'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['content_type', 'object_id']),
+            models.Index(fields=['timestamp']),
+            models.Index(fields=['user']),
+            models.Index(fields=['action_type']),
+        ]
+        db_table = 'auditlog'
+        
+    def __str__(self):
+        return f"{self.action_type} by {self.user} on {self.content_type} #{self.object_id} at {self.timestamp}"
+
         
 class LoginHistory(models.Model):
     user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
